@@ -7,6 +7,8 @@ import org.json.JSONObject
 
 data class Item(val title: String, val url: String, val time: Long)
 
+data class DlItem(val id: Long, val name: String, val url: String, val time: Long)
+
 class BTab(val webView: WebView, val incognito: Boolean) {
     var isHome = true
     var title = "Home"
@@ -14,6 +16,10 @@ class BTab(val webView: WebView, val incognito: Boolean) {
     var loading = false
     var progress = 0
     var thumb: android.graphics.Bitmap? = null
+    var picking = false
+
+    @Volatile
+    var blocked = 0
 }
 
 class Store(ctx: Context) {
@@ -106,10 +112,108 @@ class Store(ctx: Context) {
         writeList("dial", l)
     }
 
+    // ---- downloads ----
+    fun getDownloads(): MutableList<DlItem> {
+        val out = mutableListOf<DlItem>()
+        try {
+            val arr = JSONArray(sp.getString("downloads", "[]"))
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(DlItem(o.optLong("i"), o.optString("n"), o.optString("u"), o.optLong("d")))
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun writeDownloads(list: List<DlItem>) {
+        val arr = JSONArray()
+        for (x in list) {
+            arr.put(JSONObject().put("i", x.id).put("n", x.name).put("u", x.url).put("d", x.time))
+        }
+        sp.edit().putString("downloads", arr.toString()).apply()
+    }
+
+    fun addDownload(id: Long, name: String, url: String) {
+        val l = getDownloads()
+        l.removeAll { it.id == id }
+        l.add(0, DlItem(id, name, url, System.currentTimeMillis()))
+        while (l.size > 300) l.removeAt(l.size - 1)
+        writeDownloads(l)
+    }
+
+    fun removeDownload(id: Long) {
+        val l = getDownloads()
+        l.removeAll { it.id == id }
+        writeDownloads(l)
+    }
+
+    fun clearDownloads() {
+        sp.edit().putString("downloads", "[]").apply()
+    }
+
+    // ---- generic string lists (custom blocked domains, allow-list ...) ----
+    fun strings(key: String): MutableList<String> {
+        val out = mutableListOf<String>()
+        try {
+            val arr = JSONArray(sp.getString("l_$key", "[]"))
+            for (i in 0 until arr.length()) out.add(arr.getString(i))
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun writeStrings(key: String, l: List<String>) {
+        val arr = JSONArray()
+        for (x in l) arr.put(x)
+        sp.edit().putString("l_$key", arr.toString()).apply()
+    }
+
+    fun addString(key: String, v: String): Boolean {
+        val l = strings(key)
+        if (l.contains(v)) return false
+        l.add(v)
+        writeStrings(key, l)
+        return true
+    }
+
+    fun removeString(key: String, v: String) {
+        val l = strings(key)
+        l.remove(v)
+        writeStrings(key, l)
+    }
+
+    // ---- hidden elements (manual ad blocker): rule = host + newline + css selector ----
+    fun getHideRules(host: String): List<String> {
+        val pre = host + "\n"
+        return strings("hide").filter { it.startsWith(pre) }.map { it.substring(pre.length) }
+    }
+
+    fun addHideRule(host: String, selector: String) {
+        addString("hide", host + "\n" + selector)
+    }
+
+    fun removeHideRule(raw: String) {
+        removeString("hide", raw)
+    }
+
+    // ---- stats ----
+    fun getBlockedTotal(): Long = sp.getLong("stat_blocked", 0L)
+
+    fun addBlocked(n: Long) {
+        if (n <= 0) return
+        sp.edit().putLong("stat_blocked", getBlockedTotal() + n).apply()
+    }
+
     // ---- settings ----
     fun getBool(key: String, def: Boolean): Boolean = sp.getBoolean("s_$key", def)
     fun setBool(key: String, v: Boolean) {
         sp.edit().putBoolean("s_$key", v).apply()
+    }
+
+    fun getStr(key: String, def: String): String = sp.getString("s_$key", def) ?: def
+    fun setStr(key: String, v: String) {
+        sp.edit().putString("s_$key", v).apply()
     }
 
     fun getInt(key: String, def: Int): Int = sp.getInt("s_$key", def)

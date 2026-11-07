@@ -8,10 +8,18 @@ Android WebView browser. Built with GitHub Actions (no local setup needed).
 3. When it finishes, download the **AuraBrowser-debug-apk** artifact and install the APK.
 
 ## Features
-- Home shortcuts (Google, YouTube, Facebook, Instagram, X, add/remove your own)
-- Bookmarks (sort, search, detail info, single-line title, import/export HTML)
-- History, multiple tabs, Private tabs (no history)
-- Tools menu: Downloads, New tab, Full screen, Dark mode, Translate, Share URL, Find in page,
-  Print/PDF, Add to home, Ad blocker, Block images, Desktop site, Screenshot, Brightness,
-  Text size, Page source, Clear data, Exit
+- Home page with search box, voice search, quick actions, shortcuts (add/remove your own)
+- Bookmarks (sort, search, import/export HTML), History, multiple tabs, Private tabs
+- **Downloads page** (progress, open, share, copy link, retry, cancel, delete)
+- **Adult site blocker**: domain list + keyword filter + adult search block + forced SafeSearch,
+  optional parental PIN, your own blocked-sites list
+- **Ad blocker**: ~150 ad/tracker domains, hide empty ad boxes, pop-up blocker,
+  per-site allow list, blocked counter
+- **Manual ad blocker**: tap any element on a page, widen with "Parent", press "Hide"
+  (saved per site, manage under Settings / Hidden elements); add your own blocked domains
+- Long-press menu on links and images (new tab, private tab, copy, share, download)
+- Reader mode, dark mode, translate, find in page, print/PDF, screenshot, page source,
+  desktop site, text size, brightness, block images, full screen
+- Settings: search engine (Google/Bing/DuckDuckGo/Brave/Yahoo), HTTPS-only, Safe Browsing,
+  JavaScript on/off, block third-party cookies, clear data on exit, keep screen on
 - Can be set as a default browser (handles http/https links)

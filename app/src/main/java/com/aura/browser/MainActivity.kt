@@ -53,7 +53,16 @@ import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.util.concurrent.atomic.AtomicLong
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.os.Message
+import android.speech.RecognizerIntent
+import android.view.WindowManager
+import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 
 class MainActivity : AppCompatActivity() {
 
@@ -70,15 +79,6 @@ class MainActivity : AppCompatActivity() {
 
         private const val LIGHT_JS =
             "var e=document.getElementById('aura-dark');if(e)e.remove();"
-
-        private val BLOCKED = listOf(
-            "doubleclick.net", "googlesyndication.com", "googleadservices.com",
-            "adnxs.com", "taboola.com", "outbrain.com", "popads.net", "popcash.net",
-            "propellerads.com", "exoclick.com", "adsterra.com", "onclickads.net",
-            "ad-maven.com", "mgid.com", "criteo.com", "scorecardresearch.com",
-            "moatads.com", "adsco.re", "juicyads.com", "trafficjunky.com",
-            "clickadu.com", "hilltopads.net", "rubiconproject.com", "pubmatic.com"
-        )
 
         private val ZOOMS = listOf(80, 100, 125, 150, 175)
     }
@@ -103,6 +103,19 @@ class MainActivity : AppCompatActivity() {
 
     private var fullscreen = false
     private var adblockOn = true
+    private var popupBlock = true
+    private var adultOn = true
+    private var cosmetic = true
+    private var adDomains: Set<String> = emptySet()
+    private var adultDomains: Set<String> = emptySet()
+    private var adAllow: Set<String> = emptySet()
+    private val pendingBlocked = AtomicLong(0)
+    private var lastDark = false
+    private var lastDesktop = false
+    private lateinit var homeStatus: TextView
+    private lateinit var homeSearch: LinearLayout
+    private lateinit var homeMic: ImageView
+    private lateinit var quickRow: LinearLayout
     private var customView: View? = null
     private var customCb: WebChromeClient.CustomViewCallback? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
@@ -131,12 +144,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val voiceLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+            val list = r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val text = list?.firstOrNull()
+            if (r.resultCode == RESULT_OK && !text.isNullOrBlank()) {
+                if (cur == null) selectTab(newTab())
+                go(text)
+            }
+        }
+
     // ------------------------------------------------------------------ lifecycle
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = Store(this)
-        adblockOn = store.getBool("adblock", true)
+        loadPrefs()
+        lastDark = store.getBool("dark", false)
+        lastDesktop = store.getBool("desktop", false)
         setContentView(R.layout.activity_main)
 
         content = findViewById(R.id.content)
@@ -152,6 +177,10 @@ class MainActivity : AppCompatActivity() {
         tabCount = findViewById(R.id.tabCount)
         btnStar = findViewById(R.id.btnStar)
         btnRefresh = findViewById(R.id.btnRefresh)
+        homeStatus = findViewById(R.id.homeStatus)
+        homeSearch = findViewById(R.id.homeSearch)
+        homeMic = findViewById(R.id.homeMic)
+        quickRow = findViewById(R.id.quickRow)
 
         urlBar.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_GO ||
@@ -188,6 +217,7 @@ class MainActivity : AppCompatActivity() {
 
         CookieManager.getInstance().setAcceptCookie(true)
         renderDial()
+        setupHome()
 
         selectTab(newTab())
         val d = intent?.data
@@ -211,10 +241,32 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        loadPrefs()
+        for (t in tabs) applySettings(t)
+        val dk = store.getBool("dark", false)
+        if (dk != lastDark) {
+            lastDark = dk
+            for (t in tabs) if (!t.isHome) t.webView.evaluateJavascript(if (dk) DARK_JS else LIGHT_JS, null)
+        }
+        val ds = store.getBool("desktop", false)
+        if (ds != lastDesktop) {
+            lastDesktop = ds
+            for (t in tabs) if (!t.isHome) t.webView.reload()
+        }
+        if (store.getBool("keepon", false)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        updateHomeStatus()
         updateUi()
     }
 
+    override fun onPause() {
+        store.addBlocked(pendingBlocked.getAndSet(0))
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        store.addBlocked(pendingBlocked.getAndSet(0))
+        if (isFinishing && store.getBool("clearexit", false)) wipeData()
         for (t in tabs) {
             try {
                 t.webView.destroy()
@@ -264,30 +316,22 @@ class MainActivity : AppCompatActivity() {
         s.useWideViewPort = true
         s.mediaPlaybackRequiresUserGesture = false
         s.javaScriptCanOpenWindowsAutomatically = true
+        s.setSupportMultipleWindows(true)
         s.allowFileAccess = false
         applySettings(tab)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+        wv.addJavascriptInterface(PickBridge(tab), "AuraBridge")
+        wv.setOnLongClickListener { longPress(wv) }
 
-        wv.setDownloadListener { url, ua, cd, mime, _ ->
-            try {
-                val req = DownloadManager.Request(Uri.parse(url))
-                req.setMimeType(mime)
-                req.addRequestHeader("User-Agent", ua)
-                val ck = CookieManager.getInstance().getCookie(url)
-                if (ck != null) req.addRequestHeader("Cookie", ck)
-                req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                val name = URLUtil.guessFileName(url, cd, mime)
-                req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
-                (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
-                toast("Downloading $name")
-            } catch (e: Exception) {
-                toast("Download failed")
-            }
-        }
+        wv.setDownloadListener { url, ua, cd, mime, _ -> startDownload(url, ua, cd, mime) }
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val u = request.url
+                if (adultOn && AdultFilter.isBlocked(u, adultDomains)) {
+                    val bh = u.host ?: ""
+                    view.loadDataWithBaseURL(null, AdultFilter.blockedPage(bh), "text/html", "utf-8", null)
+                    return true
+                }
                 val scheme = u.scheme ?: return false
                 if (scheme == "http" || scheme == "https" || scheme == "about" ||
                     scheme == "file" || scheme == "data" || scheme == "blob"
@@ -309,19 +353,35 @@ class MainActivity : AppCompatActivity() {
             override fun shouldInterceptRequest(
                 view: WebView, request: WebResourceRequest
             ): WebResourceResponse? {
-                if (adblockOn) {
-                    val h = request.url.host
-                    if (h != null && BLOCKED.any { h == it || h.endsWith(".$it") }) {
-                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
-                    }
+                val u = request.url
+                val host = u.host ?: return null
+                if (adultOn && AdultFilter.isBlocked(u, adultDomains)) {
+                    return if (request.isForMainFrame) {
+                        WebResourceResponse(
+                            "text/html", "utf-8",
+                            ByteArrayInputStream(AdultFilter.blockedPage(host).toByteArray())
+                        )
+                    } else emptyResponse()
+                }
+                if (adblockOn && !adAllow.contains(normHost(hostOf(tab.url))) &&
+                    (AdBlock.matches(host, AdBlock.SET) || AdBlock.matches(host, adDomains))
+                ) {
+                    tab.blocked++
+                    pendingBlocked.incrementAndGet()
+                    return emptyResponse()
                 }
                 return null
+            }
+
+            override fun onPageCommitVisible(view: WebView, url: String?) {
+                applyHide(tab)
             }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 tab.url = url ?: ""
                 tab.loading = true
                 tab.progress = 10
+                tab.blocked = 0
                 if (tab === cur) updateUi()
             }
 
@@ -330,8 +390,11 @@ class MainActivity : AppCompatActivity() {
                 tab.progress = 100
                 tab.url = url ?: tab.url
                 tab.title = view.title ?: tab.url
-                if (!tab.incognito) store.addHistory(tab.title, tab.url)
-                if (store.getBool("dark", false)) view.evaluateJavascript(DARK_JS, null)
+                val blockedPage = adultOn && AdultFilter.isBlocked(tab.url, adultDomains)
+                if (blockedPage) tab.title = "Blocked"
+                if (!tab.incognito && !blockedPage) store.addHistory(tab.title, tab.url)
+                if (store.getBool("dark", false) && !blockedPage) view.evaluateJavascript(DARK_JS, null)
+                applyHide(tab)
                 if (tab === cur) updateUi()
             }
 
@@ -348,6 +411,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         wv.webChromeClient = object : WebChromeClient() {
+            override fun onCreateWindow(
+                view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message
+            ): Boolean {
+                if (popupBlock && !isUserGesture) {
+                    toast("Pop-up blocked")
+                    return false
+                }
+                val nt = newTab(tab.incognito)
+                nt.isHome = false
+                (resultMsg.obj as WebView.WebViewTransport).webView = nt.webView
+                resultMsg.sendToTarget()
+                selectTab(nt)
+                return true
+            }
+
+            override fun onCloseWindow(window: WebView) {
+                val t = tabs.firstOrNull { it.webView === window } ?: return
+                if (tabs.size > 1) closeTab(t) else goHome()
+            }
+
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 tab.progress = newProgress
                 if (tab === cur) progress.progress = newProgress
@@ -418,10 +501,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applySettings(t: BTab) {
-        val s = t.webView.settings
-        s.userAgentString = if (store.getBool("desktop", false)) DESKTOP_UA else mobileUa
-        s.blockNetworkImage = store.getBool("blockimg", false)
-        s.textZoom = store.getInt("zoom", 100)
+        val st = t.webView.settings
+        st.userAgentString = if (store.getBool("desktop", false)) DESKTOP_UA else mobileUa
+        st.blockNetworkImage = store.getBool("blockimg", false)
+        st.textZoom = store.getInt("zoom", 100)
+        st.javaScriptEnabled = store.getBool("js", true)
+        st.setSafeBrowsingEnabled(store.getBool("safebrowsing", true))
+        CookieManager.getInstance().setAcceptThirdPartyCookies(t.webView, !store.getBool("block3p", false))
     }
 
     private fun selectTab(t: BTab) {
@@ -477,13 +563,27 @@ class MainActivity : AppCompatActivity() {
             t.startsWith("file://") || t.startsWith("about:")
         ) return t
         if (!t.contains(" ") && t.contains(".")) return "https://$t"
-        return "https://www.google.com/search?q=" + Uri.encode(t)
+        return searchUrl(Uri.encode(t))
     }
+
+    private fun searchUrl(q: String): String {
+        val safe = adultOn
+        return when (store.getInt("engine", 0)) {
+            1 -> "https://www.bing.com/search?q=$q" + if (safe) "&adlt=strict" else ""
+            2 -> "https://duckduckgo.com/?q=$q" + if (safe) "&kp=1" else ""
+            3 -> "https://search.brave.com/search?q=$q" + if (safe) "&safesearch=strict" else ""
+            4 -> "https://search.yahoo.com/search?p=$q" + if (safe) "&vm=r" else ""
+            else -> "https://www.google.com/search?q=$q" + if (safe) "&safe=active" else ""
+        }
+    }
+
+    private fun upgrade(u: String): String =
+        if (store.getBool("httpsonly", false) && u.startsWith("http://")) "https://" + u.removePrefix("http://") else u
 
     private fun go(input: String) {
         val t = cur ?: return
         if (input.isBlank()) return
-        val u = resolve(input)
+        val u = upgrade(resolve(input))
         t.isHome = false
         t.url = u
         showContent()
@@ -807,14 +907,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         add(R.drawable.ic_history, "History") { openItems("history") }
-        add(R.drawable.ic_download, "Downloads") {
-            try {
-                startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
-            } catch (e: Exception) {
-                toast("Cannot open downloads")
-            }
-        }
+        add(R.drawable.ic_download, "Downloads") { openDownloads() }
         add(R.drawable.ic_add_box, "New tab") { selectTab(newTab()) }
+        add(R.drawable.ic_incognito, "Private tab") { selectTab(newTab(true)) }
+        add(R.drawable.ic_settings, "Settings") { openSettings() }
+        add(R.drawable.ic_shield, "Ad blocker", adblockOn) { adBlockDialog() }
+        add(R.drawable.ic_pick, "Hide element") { startPicker() }
+        add(R.drawable.ic_block, "Adult block", adultOn) { toggleAdult() }
+        add(R.drawable.ic_reader, "Reader mode") { readerMode() }
+        add(R.drawable.ic_mic, "Voice search") { voiceSearch() }
         add(R.drawable.ic_fullscreen, "Full screen") {
             setFullscreen(true)
             toast("Press back to exit full screen")
@@ -822,14 +923,10 @@ class MainActivity : AppCompatActivity() {
         add(R.drawable.ic_moon, "Dark mode", store.getBool("dark", false)) { toggleDark() }
         add(R.drawable.ic_translate, "Translate") { translate() }
         add(R.drawable.ic_share, "Share URL") { shareUrl() }
+        add(R.drawable.ic_copy, "Copy link") { copyLink() }
         add(R.drawable.ic_search, "Find in page") { openFind() }
         add(R.drawable.ic_print, "Print / PDF") { printPage() }
         add(R.drawable.ic_playlist_add, "Add to home") { addToDial() }
-        add(R.drawable.ic_shield, "Ad blocker", adblockOn) {
-            adblockOn = !adblockOn
-            store.setBool("adblock", adblockOn)
-            toast(if (adblockOn) "Ad blocker on" else "Ad blocker off")
-        }
         add(R.drawable.ic_image, "Block images", store.getBool("blockimg", false)) {
             val v = !store.getBool("blockimg", false)
             store.setBool("blockimg", v)
@@ -861,6 +958,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleDark() {
         val v = !store.getBool("dark", false)
         store.setBool("dark", v)
+        lastDark = v
         for (t in tabs) {
             if (!t.isHome) t.webView.evaluateJavascript(if (v) DARK_JS else LIGHT_JS, null)
         }
@@ -870,6 +968,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleDesktop() {
         val v = !store.getBool("desktop", false)
         store.setBool("desktop", v)
+        lastDesktop = v
         for (t in tabs) applySettings(t)
         val c = cur
         if (c != null && !c.isHome) c.webView.reload()
@@ -1020,15 +1119,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Clear data")
             .setMessage("Clear cookies, cache and history?")
             .setPositiveButton("Clear") { _, _ ->
-                WebStorage.getInstance().deleteAllData()
-                CookieManager.getInstance().removeAllCookies(null)
-                CookieManager.getInstance().flush()
-                for (t in tabs) {
-                    t.webView.clearCache(true)
-                    t.webView.clearHistory()
-                    t.webView.clearFormData()
-                }
-                store.clearHistory()
+                wipeData()
                 toast("Data cleared")
             }
             .setNegativeButton("Cancel", null)
@@ -1053,5 +1144,344 @@ class MainActivity : AppCompatActivity() {
         } else {
             c.show(WindowInsetsCompat.Type.systemBars())
         }
+    }
+
+    // ------------------------------------------------------------------ prefs / home
+
+    private fun loadPrefs() {
+        adblockOn = store.getBool("adblock", true)
+        popupBlock = store.getBool("popup", true)
+        adultOn = store.getBool("adult", true)
+        cosmetic = store.getBool("cosmetic", true)
+        adDomains = store.strings("addom").toHashSet()
+        adultDomains = store.strings("adultdom").toHashSet()
+        adAllow = store.strings("adallow").toHashSet()
+    }
+
+    private fun normHost(h: String): String = h.lowercase().removePrefix("www.")
+
+    private fun emptyResponse() =
+        WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+
+    private fun escHtml(t: String) =
+        t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    private fun setupHome() {
+        homeSearch.setOnClickListener {
+            urlBar.requestFocus()
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(urlBar, InputMethodManager.SHOW_IMPLICIT)
+        }
+        homeMic.setOnClickListener { voiceSearch() }
+        quickRow.removeAllViews()
+        fun q(icon: Int, label: String, action: () -> Unit) {
+            val cell = LinearLayout(this)
+            cell.orientation = LinearLayout.VERTICAL
+            cell.gravity = Gravity.CENTER_HORIZONTAL
+            val circle = GradientDrawable()
+            circle.shape = GradientDrawable.OVAL
+            circle.setColor(0xFF1E1E24.toInt())
+            val ic = iconButton(icon, 52, 52, 24)
+            ic.background = circle
+            val l = tv(label, 12f, 0xFFAAAAAA.toInt())
+            l.gravity = Gravity.CENTER
+            l.maxLines = 1
+            l.setPadding(0, dp(6), 0, 0)
+            cell.addView(ic)
+            cell.addView(l)
+            cell.setOnClickListener { action() }
+            quickRow.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        q(R.drawable.ic_download, "Downloads") { openDownloads() }
+        q(R.drawable.ic_bookmark, "Bookmarks") { openItems("bookmark") }
+        q(R.drawable.ic_history, "History") { openItems("history") }
+        q(R.drawable.ic_shield, "Ad block") { adBlockDialog() }
+        q(R.drawable.ic_settings, "Settings") { openSettings() }
+        updateHomeStatus()
+    }
+
+    private fun updateHomeStatus() {
+        val total = store.getBlockedTotal() + pendingBlocked.get()
+        homeStatus.text = "Ads: " + (if (adblockOn) "ON" else "OFF") +
+            "   •   Adult block: " + (if (adultOn) "ON" else "OFF") +
+            "   •   " + total + " blocked"
+    }
+
+    private fun openDownloads() {
+        startActivity(Intent(this, DownloadsActivity::class.java))
+    }
+
+    private fun openSettings() {
+        startActivity(Intent(this, SettingsActivity::class.java))
+    }
+
+    private fun openList(mode: String) {
+        startActivity(Intent(this, ManageActivity::class.java).putExtra("mode", mode))
+    }
+
+    // ------------------------------------------------------------------ downloads
+
+    private fun startDownload(url: String, ua: String?, cd: String?, mime: String?) {
+        if (!url.startsWith("http")) {
+            toast("This link type cannot be downloaded")
+            return
+        }
+        if (adultOn && AdultFilter.isBlocked(url, adultDomains)) {
+            toast("Blocked")
+            return
+        }
+        try {
+            val req = DownloadManager.Request(Uri.parse(url))
+            if (mime != null) req.setMimeType(mime)
+            if (ua != null) req.addRequestHeader("User-Agent", ua)
+            val ck = CookieManager.getInstance().getCookie(url)
+            if (ck != null) req.addRequestHeader("Cookie", ck)
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            val name = URLUtil.guessFileName(url, cd, mime)
+            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+            val id = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
+            store.addDownload(id, name, url)
+            toast("Downloading $name")
+        } catch (e: Exception) {
+            toast("Download failed")
+        }
+    }
+
+    // ------------------------------------------------------------------ long press menu
+
+    private fun longPress(wv: WebView): Boolean {
+        val r = wv.hitTestResult
+        val extra = r.extra ?: return false
+        if (!extra.startsWith("http")) return false
+        return when (r.type) {
+            WebView.HitTestResult.SRC_ANCHOR_TYPE,
+            WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE -> {
+                linkMenu(extra, false)
+                true
+            }
+            WebView.HitTestResult.IMAGE_TYPE -> {
+                linkMenu(extra, true)
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun linkMenu(url: String, image: Boolean) {
+        val labels = if (image)
+            arrayOf("Open image in new tab", "Download image", "Copy image link", "Share image link")
+        else
+            arrayOf("Open in new tab", "Open in private tab", "Copy link", "Share link", "Download link")
+        AlertDialog.Builder(this)
+            .setTitle(hostOf(url))
+            .setItems(labels) { _, w ->
+                if (image) {
+                    when (w) {
+                        0 -> {
+                            selectTab(newTab(cur?.incognito == true))
+                            go(url)
+                        }
+                        1 -> {
+                            val ext = MimeTypeMap.getFileExtensionFromUrl(url)
+                            val mt = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "image/jpeg"
+                            startDownload(url, null, null, mt)
+                        }
+                        2 -> copyText(url)
+                        3 -> shareText(url)
+                    }
+                } else {
+                    when (w) {
+                        0 -> {
+                            selectTab(newTab(cur?.incognito == true))
+                            go(url)
+                        }
+                        1 -> {
+                            selectTab(newTab(true))
+                            go(url)
+                        }
+                        2 -> copyText(url)
+                        3 -> shareText(url)
+                        4 -> startDownload(url, null, null, null)
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun copyText(t: String) {
+        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("url", t))
+        toast("Copied")
+    }
+
+    private fun shareText(t: String) {
+        val i = Intent(Intent.ACTION_SEND)
+        i.type = "text/plain"
+        i.putExtra(Intent.EXTRA_TEXT, t)
+        startActivity(Intent.createChooser(i, "Share"))
+    }
+
+    private fun copyLink() {
+        val t = cur ?: return
+        if (t.isHome || t.url.isEmpty()) {
+            toast("Open a page first")
+            return
+        }
+        copyText(t.url)
+    }
+
+    // ------------------------------------------------------------------ ad blocker (manual + auto)
+
+    private fun adBlockDialog() {
+        val t = cur
+        val host = if (t != null && !t.isHome && t.url.startsWith("http")) normHost(hostOf(t.url)) else null
+        val labels = mutableListOf<String>()
+        val acts = mutableListOf<() -> Unit>()
+
+        labels.add(if (adblockOn) "Turn ad blocker OFF" else "Turn ad blocker ON")
+        acts.add {
+            adblockOn = !adblockOn
+            store.setBool("adblock", adblockOn)
+            updateHomeStatus()
+            toast(if (adblockOn) "Ad blocker on" else "Ad blocker off")
+        }
+        labels.add("Hide an element on this page")
+        acts.add { startPicker() }
+        if (host != null) {
+            val allowed = adAllow.contains(host)
+            labels.add(if (allowed) "Block ads on $host again" else "Allow ads on $host")
+            acts.add {
+                if (allowed) store.removeString("adallow", host) else store.addString("adallow", host)
+                adAllow = store.strings("adallow").toHashSet()
+                t?.webView?.reload()
+            }
+        }
+        labels.add("Hidden elements (" + store.strings("hide").size + ")")
+        acts.add { openList("hide") }
+        labels.add("Blocked domains (" + store.strings("addom").size + ")")
+        acts.add { openList("addomains") }
+        val here = t?.blocked ?: 0
+        labels.add("Blocked here: $here  •  total " + (store.getBlockedTotal() + pendingBlocked.get()))
+        acts.add { }
+
+        AlertDialog.Builder(this)
+            .setTitle("Ad blocker")
+            .setItems(labels.toTypedArray()) { _, w -> acts[w]() }
+            .show()
+    }
+
+    private fun startPicker() {
+        val t = cur
+        if (t == null || t.isHome) {
+            toast("Open a page first")
+            return
+        }
+        t.picking = true
+        t.webView.evaluateJavascript(AdBlock.PICKER_JS, null)
+    }
+
+    inner class PickBridge(private val tab: BTab) {
+        @JavascriptInterface
+        fun picked(selector: String) {
+            runOnUiThread {
+                if (!tab.picking) return@runOnUiThread
+                tab.picking = false
+                val sel = selector.trim()
+                if (sel.isEmpty() || sel.length > 600 || sel.contains("\n")) return@runOnUiThread
+                val host = normHost(hostOf(tab.url))
+                if (host.isEmpty()) return@runOnUiThread
+                store.addHideRule(host, sel)
+                toast("Element hidden")
+            }
+        }
+
+        @JavascriptInterface
+        fun cancelled() {
+            runOnUiThread { tab.picking = false }
+        }
+    }
+
+    private fun applyHide(t: BTab) {
+        val url = t.url
+        if (!url.startsWith("http")) return
+        val host = normHost(hostOf(url))
+        val sb = StringBuilder()
+        if (adblockOn && cosmetic && !adAllow.contains(host)) sb.append(AdBlock.COSMETIC_CSS).append('\n')
+        for (r in store.getHideRules(host)) sb.append(r).append("{display:none!important}\n")
+        if (sb.isNotEmpty()) t.webView.evaluateJavascript(AdBlock.styleJs(sb.toString()), null)
+    }
+
+    // ------------------------------------------------------------------ adult block / pin
+
+    private fun toggleAdult() {
+        if (adultOn) {
+            askPin {
+                adultOn = false
+                store.setBool("adult", false)
+                updateHomeStatus()
+                toast("Adult site block OFF")
+            }
+        } else {
+            adultOn = true
+            store.setBool("adult", true)
+            updateHomeStatus()
+            toast("Adult site block ON")
+        }
+    }
+
+    // ------------------------------------------------------------------ reader / voice / wipe
+
+    private fun readerMode() {
+        val t = cur
+        if (t == null || t.isHome) {
+            toast("Open a page first")
+            return
+        }
+        t.webView.evaluateJavascript(AdBlock.READER_JS) { r ->
+            try {
+                val json = JSONObject(JSONArray("[$r]").getString(0))
+                val body = json.optString("body")
+                if (body.length < 200) {
+                    toast("Reader mode is not available for this page")
+                    return@evaluateJavascript
+                }
+                val html = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" +
+                    "<style>body{margin:auto;padding:18px;max-width:720px;background:#121212;color:#e6e6e6;" +
+                    "font:18px/1.7 serif}h1,h2,h3{font-family:sans-serif;line-height:1.3}" +
+                    "img{max-width:100%;height:auto;border-radius:8px}" +
+                    "blockquote{border-left:3px solid #7C8CFF;margin:0;padding-left:14px;color:#bbb}" +
+                    "</style></head><body><h1>" + escHtml(json.optString("title")) + "</h1>" + body +
+                    "</body></html>"
+                t.webView.loadDataWithBaseURL(t.url, html, "text/html", "utf-8", t.url)
+            } catch (e: Exception) {
+                toast("Reader mode failed")
+            }
+        }
+    }
+
+    private fun voiceSearch() {
+        try {
+            val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Search or say a website")
+            voiceLauncher.launch(i)
+        } catch (e: Exception) {
+            toast("Voice search is not available")
+        }
+    }
+
+    private fun wipeData() {
+        WebStorage.getInstance().deleteAllData()
+        CookieManager.getInstance().removeAllCookies(null)
+        CookieManager.getInstance().flush()
+        for (t in tabs) {
+            try {
+                t.webView.clearCache(true)
+                t.webView.clearHistory()
+                t.webView.clearFormData()
+            } catch (_: Exception) {
+            }
+        }
+        store.clearHistory()
     }
 }

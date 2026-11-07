@@ -20,11 +20,42 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.text.InputType
 import android.view.Gravity
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+
+val ENGINES = listOf("Google", "Bing", "DuckDuckGo", "Brave", "Yahoo")
+
+fun sha256(s: String): String {
+    val d = java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray())
+    return d.joinToString("") { "%02x".format(it) }
+}
+
+/** Runs [onOk] right away when no PIN is set, otherwise only after the right PIN is typed. */
+fun Context.askPin(onOk: () -> Unit) {
+    val saved = Store(this).getStr("pin", "")
+    if (saved.isEmpty()) {
+        onOk()
+        return
+    }
+    val e = EditText(this)
+    e.hint = "PIN"
+    e.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+    val box = LinearLayout(this)
+    box.setPadding(dp(20), dp(8), dp(20), 0)
+    box.addView(e, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    AlertDialog.Builder(this)
+        .setTitle("Enter PIN")
+        .setView(box)
+        .setPositiveButton("OK") { _, _ ->
+            if (sha256(e.text.toString()) == saved) onOk() else toast("Wrong PIN")
+        }
+        .setNegativeButton("Cancel", null)
+        .show()
+}
 
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -193,4 +224,10 @@ object FaviconCache {
             }
         }.start()
     }
+}
+
+fun cleanDomain(s: String): String {
+    var t = s.trim().lowercase().removePrefix("http://").removePrefix("https://").removePrefix("www.")
+    t = t.substringBefore('/').substringBefore('?').substringBefore(':')
+    return t
 }
