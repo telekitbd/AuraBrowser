@@ -121,21 +121,6 @@ class SettingsActivity : AppCompatActivity() {
         toggleRow("Keep screen on", "Screen stays awake while browsing", "keepon", false)
 
         section("Safety")
-        val adult = store.getBool("adult", true)
-        row("Adult site blocker", if (adult) "ON - adult sites and searches are blocked" else "OFF", sw(adult)) {
-            if (adult) askPin {
-                store.setBool("adult", false)
-                render()
-            } else {
-                store.setBool("adult", true)
-                render()
-            }
-        }
-        val hasPin = store.getStr("pin", "").isNotEmpty()
-        row("Parental PIN", if (hasPin) "Set - needed to turn the adult blocker off" else "Not set", null) {
-            pinMenu(hasPin)
-        }
-        row("Blocked sites list", "${store.strings("adultdom").size} sites you added", null) { openList("adultdomains") }
         toggleRow("HTTPS-only mode", "Upgrade http:// links to https://", "httpsonly", false)
         toggleRow("Safe Browsing", "Warn about dangerous sites", "safebrowsing", true)
 
@@ -146,6 +131,15 @@ class SettingsActivity : AppCompatActivity() {
         row("Hidden elements", "${store.strings("hide").size} elements you hid manually", null) { openList("hide") }
         row("Blocked ad domains", "${store.strings("addom").size} domains you added", null) { openList("addomains") }
         row("Ad blocker is off on", "${store.strings("adallow").size} sites", null) { openList("adallow") }
+        row("Update ad lists", "${AdLists.count} extra domains loaded - tap to refresh", null) {
+            toast("Updating ad lists...")
+            AdLists.update(applicationContext) { n ->
+                runOnUiThread {
+                    toast(if (n > 0) "Ad lists updated: $n domains" else "Update failed - check internet")
+                    render()
+                }
+            }
+        }
         row("Blocked so far", store.getBlockedTotal().toString() + " requests", null) { }
 
         section("Privacy")

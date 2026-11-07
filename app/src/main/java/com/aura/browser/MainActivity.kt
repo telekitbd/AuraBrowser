@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
@@ -15,6 +16,7 @@ import android.os.Environment
 import android.print.PrintAttributes
 import android.print.PrintManager
 import android.provider.MediaStore
+import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.KeyEvent
@@ -50,6 +52,12 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.widget.doAfterTextChanged
+import androidx.core.content.pm.ShortcutInfoCompat
+import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.core.graphics.drawable.IconCompat
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Spinner
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import org.json.JSONArray
@@ -63,6 +71,8 @@ import android.speech.RecognizerIntent
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
+
+private class BarItem(val res: Int, val color: Int, val action: () -> Unit)
 
 class MainActivity : AppCompatActivity() {
 
@@ -80,7 +90,13 @@ class MainActivity : AppCompatActivity() {
         private const val LIGHT_JS =
             "var e=document.getElementById('aura-dark');if(e)e.remove();"
 
-        private val ZOOMS = listOf(80, 100, 125, 150, 175)
+        private val SF_NAMES = listOf("Off", "Night (amber)", "Reading (paper)", "Eye care (green)", "Blue-light cut", "Dim (black)", "Red night")
+        private val SF_COLORS = intArrayOf(0, 0xFF8C00, 0xC8A060, 0x4CAF50, 0xFFB300, 0x000000, 0xFF0000)
+        private val TTS_LANGS = listOf(
+            "Auto (page / device)" to "", "English" to "en-US", "Bangla" to "bn-BD", "Hindi" to "hi-IN",
+            "Urdu" to "ur-PK", "Arabic" to "ar", "Spanish" to "es-ES", "French" to "fr-FR",
+            "German" to "de-DE", "Russian" to "ru-RU", "Chinese" to "zh-CN", "Japanese" to "ja-JP"
+        )
     }
 
     private lateinit var store: Store
@@ -104,10 +120,8 @@ class MainActivity : AppCompatActivity() {
     private var fullscreen = false
     private var adblockOn = true
     private var popupBlock = true
-    private var adultOn = true
     private var cosmetic = true
     private var adDomains: Set<String> = emptySet()
-    private var adultDomains: Set<String> = emptySet()
     private var adAllow: Set<String> = emptySet()
     private val pendingBlocked = AtomicLong(0)
     private var lastDark = false
@@ -115,10 +129,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var homeStatus: TextView
     private lateinit var homeSearch: LinearLayout
     private lateinit var homeMic: ImageView
-    private lateinit var quickRow: LinearLayout
     private var customView: View? = null
     private var customCb: WebChromeClient.CustomViewCallback? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var speech: SpeechController? = null
+    private var readBar: LinearLayout? = null
+    private var readPlay: TextView? = null
+    private var filterView: View? = null
+    private var oneHand = false
+    private var handPanel: View? = null
 
     private val mobileUa: String by lazy {
         WebSettings.getDefaultUserAgent(this).replace("; wv", "")
@@ -180,7 +199,6 @@ class MainActivity : AppCompatActivity() {
         homeStatus = findViewById(R.id.homeStatus)
         homeSearch = findViewById(R.id.homeSearch)
         homeMic = findViewById(R.id.homeMic)
-        quickRow = findViewById(R.id.quickRow)
 
         urlBar.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_GO ||
@@ -216,6 +234,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.findClose).setOnClickListener { closeFind() }
 
         CookieManager.getInstance().setAcceptCookie(true)
+        Doh.endpoint = store.getStr("dns_url", "")
+        AdLists.load(applicationContext)
+        applyScreenFilter()
         renderDial()
         setupHome()
 
@@ -265,6 +286,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        speech?.shutdown()
+        speech = null
         store.addBlocked(pendingBlocked.getAndSet(0))
         if (isFinishing && store.getBool("clearexit", false)) wipeData()
         for (t in tabs) {
@@ -279,6 +302,10 @@ class MainActivity : AppCompatActivity() {
     private fun onBack() {
         if (customView != null) {
             hideCustom()
+            return
+        }
+        if (oneHand) {
+            exitOneHand()
             return
         }
         if (findBar.visibility == View.VISIBLE) {
@@ -327,9 +354,12 @@ class MainActivity : AppCompatActivity() {
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val u = request.url
-                if (adultOn && AdultFilter.isBlocked(u, adultDomains)) {
-                    val bh = u.host ?: ""
-                    view.loadDataWithBaseURL(null, AdultFilter.blockedPage(bh), "text/html", "utf-8", null)
+                val navHost = u.host
+                if (adblockOn && navHost != null && !adAllow.contains(normHost(hostOf(tab.url))) &&
+                    (u.scheme == "http" || u.scheme == "https") && isAdHost(navHost)
+                ) {
+                    tab.blocked++
+                    pendingBlocked.incrementAndGet()
                     return true
                 }
                 val scheme = u.scheme ?: return false
@@ -355,26 +385,33 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val u = request.url
                 val host = u.host ?: return null
-                if (adultOn && AdultFilter.isBlocked(u, adultDomains)) {
+                if (adblockOn) {
+                    val pageHost = normHost(hostOf(tab.url))
+                    if (!adAllow.contains(pageHost)) {
+                        val third = pageHost.isNotEmpty() && !AdBlock.sameSite(pageHost, normHost(host))
+                        if (isAdHost(host) ||
+                            (third && !request.isForMainFrame && AdBlock.looksLikeAd(u.toString()))
+                        ) {
+                            tab.blocked++
+                            pendingBlocked.incrementAndGet()
+                            return emptyResponse()
+                        }
+                    }
+                }
+                if (Doh.endpoint.isNotEmpty() && Doh.isBlocked(host)) {
                     return if (request.isForMainFrame) {
                         WebResourceResponse(
                             "text/html", "utf-8",
-                            ByteArrayInputStream(AdultFilter.blockedPage(host).toByteArray())
+                            ByteArrayInputStream(dnsBlockedPage(host).toByteArray())
                         )
                     } else emptyResponse()
-                }
-                if (adblockOn && !adAllow.contains(normHost(hostOf(tab.url))) &&
-                    (AdBlock.matches(host, AdBlock.SET) || AdBlock.matches(host, adDomains))
-                ) {
-                    tab.blocked++
-                    pendingBlocked.incrementAndGet()
-                    return emptyResponse()
                 }
                 return null
             }
 
             override fun onPageCommitVisible(view: WebView, url: String?) {
                 applyHide(tab)
+                injectAnti(tab)
             }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
@@ -382,6 +419,7 @@ class MainActivity : AppCompatActivity() {
                 tab.loading = true
                 tab.progress = 10
                 tab.blocked = 0
+                injectAnti(tab)
                 if (tab === cur) updateUi()
             }
 
@@ -390,11 +428,10 @@ class MainActivity : AppCompatActivity() {
                 tab.progress = 100
                 tab.url = url ?: tab.url
                 tab.title = view.title ?: tab.url
-                val blockedPage = adultOn && AdultFilter.isBlocked(tab.url, adultDomains)
-                if (blockedPage) tab.title = "Blocked"
-                if (!tab.incognito && !blockedPage) store.addHistory(tab.title, tab.url)
-                if (store.getBool("dark", false) && !blockedPage) view.evaluateJavascript(DARK_JS, null)
+                if (!tab.incognito) store.addHistory(tab.title, tab.url)
+                if (store.getBool("dark", false)) view.evaluateJavascript(DARK_JS, null)
                 applyHide(tab)
+                injectAnti(tab)
                 if (tab === cur) updateUi()
             }
 
@@ -414,15 +451,73 @@ class MainActivity : AppCompatActivity() {
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message
             ): Boolean {
-                if (popupBlock && !isUserGesture) {
-                    toast("Pop-up blocked")
-                    return false
+                val hit = view.hitTestResult.type
+                val fromLink = hit == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+                    hit == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                if (!popupBlock || fromLink) {
+                    // a real link tap (or blocker turned off): open normally
+                    val nt = newTab(tab.incognito)
+                    nt.isHome = false
+                    (resultMsg.obj as WebView.WebViewTransport).webView = nt.webView
+                    resultMsg.sendToTarget()
+                    selectTab(nt)
+                    return true
                 }
-                val nt = newTab(tab.incognito)
-                nt.isHome = false
-                (resultMsg.obj as WebView.WebViewTransport).webView = nt.webView
+                // Script-opened window (typical pop-up / pop-under ad that fires on the first tap
+                // on a video). Look at the target first and only open it when it is the same
+                // site or a login pop-up.
+                val probe = WebView(this@MainActivity)
+                val decided = java.util.concurrent.atomic.AtomicBoolean(false)
+                fun decide(url: String) {
+                    if (url.isBlank() || url.startsWith("about:")) return
+                    if (!decided.compareAndSet(false, true)) return
+                    val h = Uri.parse(url).host ?: ""
+                    val pageHost = normHost(hostOf(tab.url))
+                    val cross = h.isNotEmpty() && pageHost.isNotEmpty() &&
+                        !AdBlock.sameSite(pageHost, normHost(h))
+                    val bad = adblockOn && (isAdHost(h) || AdBlock.looksLikeAd(url))
+                    val allow = !bad && (!cross || AdBlock.isTrustedPopup(h))
+                    runOnUiThread {
+                        try {
+                            probe.stopLoading()
+                            probe.destroy()
+                        } catch (_: Exception) {
+                        }
+                        if (allow) {
+                            val nt = newTab(tab.incognito)
+                            nt.isHome = false
+                            selectTab(nt)
+                            go(url)
+                        } else {
+                            tab.blocked++
+                            pendingBlocked.incrementAndGet()
+                            toast("Pop-up blocked")
+                        }
+                    }
+                }
+                probe.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean {
+                        decide(request.url.toString())
+                        return true
+                    }
+
+                    override fun shouldInterceptRequest(
+                        v: WebView, request: WebResourceRequest
+                    ): WebResourceResponse? {
+                        if (request.isForMainFrame) decide(request.url.toString())
+                        return emptyResponse()
+                    }
+                }
+                (resultMsg.obj as WebView.WebViewTransport).webView = probe
                 resultMsg.sendToTarget()
-                selectTab(nt)
+                probe.postDelayed({
+                    if (decided.compareAndSet(false, true)) {
+                        try {
+                            probe.destroy()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }, 8000)
                 return true
             }
 
@@ -464,6 +559,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            override fun getDefaultVideoPoster(): Bitmap? =
+                Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+
             override fun onShowCustomView(view: View, callback: WebChromeClient.CustomViewCallback) {
                 if (customView != null) {
                     callback.onCustomViewHidden()
@@ -478,6 +576,11 @@ class MainActivity : AppCompatActivity() {
                     )
                 )
                 setBars(true)
+                requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                val lp = window.attributes
+                lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                window.attributes = lp
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
 
             override fun onHideCustomView() {
@@ -498,6 +601,11 @@ class MainActivity : AppCompatActivity() {
         customCb?.onCustomViewHidden()
         customCb = null
         setBars(fullscreen)
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        val lp = window.attributes
+        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+        window.attributes = lp
+        if (!store.getBool("keepon", false)) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun applySettings(t: BTab) {
@@ -567,13 +675,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun searchUrl(q: String): String {
-        val safe = adultOn
         return when (store.getInt("engine", 0)) {
-            1 -> "https://www.bing.com/search?q=$q" + if (safe) "&adlt=strict" else ""
-            2 -> "https://duckduckgo.com/?q=$q" + if (safe) "&kp=1" else ""
-            3 -> "https://search.brave.com/search?q=$q" + if (safe) "&safesearch=strict" else ""
-            4 -> "https://search.yahoo.com/search?p=$q" + if (safe) "&vm=r" else ""
-            else -> "https://www.google.com/search?q=$q" + if (safe) "&safe=active" else ""
+            1 -> "https://www.bing.com/search?q=$q"
+            2 -> "https://duckduckgo.com/?q=$q"
+            3 -> "https://search.brave.com/search?q=$q"
+            4 -> "https://search.yahoo.com/search?p=$q"
+            else -> "https://www.google.com/search?q=$q"
         }
     }
 
@@ -879,7 +986,7 @@ class MainActivity : AppCompatActivity() {
         val dlg = BottomSheetDialog(this)
         val grid = GridLayout(this)
         grid.columnCount = 5
-        grid.setPadding(dp(4), dp(16), dp(4), dp(20))
+        grid.setPadding(dp(4), dp(10), dp(4), dp(14))
         val w = resources.displayMetrics.widthPixels / 5 - 1
         val on = 0xFF9FA8FF.toInt()
 
@@ -909,46 +1016,121 @@ class MainActivity : AppCompatActivity() {
         add(R.drawable.ic_history, "History") { openItems("history") }
         add(R.drawable.ic_download, "Downloads") { openDownloads() }
         add(R.drawable.ic_add_box, "New tab") { selectTab(newTab()) }
-        add(R.drawable.ic_incognito, "Private tab") { selectTab(newTab(true)) }
-        add(R.drawable.ic_settings, "Settings") { openSettings() }
-        add(R.drawable.ic_shield, "Ad blocker", adblockOn) { adBlockDialog() }
-        add(R.drawable.ic_pick, "Hide element") { startPicker() }
-        add(R.drawable.ic_block, "Adult block", adultOn) { toggleAdult() }
-        add(R.drawable.ic_reader, "Reader mode") { readerMode() }
-        add(R.drawable.ic_mic, "Voice search") { voiceSearch() }
+        add(R.drawable.ic_image_viewer, "Image viewer") { imageViewer() }
+        add(R.drawable.ic_save_images, "Save all images") { saveAllImages() }
+
         add(R.drawable.ic_fullscreen, "Full screen") {
             setFullscreen(true)
             toast("Press back to exit full screen")
         }
         add(R.drawable.ic_moon, "Dark mode", store.getBool("dark", false)) { toggleDark() }
         add(R.drawable.ic_translate, "Translate") { translate() }
+        add(R.drawable.ic_read_aloud, "Read aloud", speech?.playing == true) { readAloud() }
+        add(R.drawable.ic_tts, "Text to Speech") { ttsDialog() }
+
+        add(R.drawable.ic_playlist_add, "Add current page") { addCurrentPage() }
         add(R.drawable.ic_share, "Share URL") { shareUrl() }
-        add(R.drawable.ic_copy, "Copy link") { copyLink() }
         add(R.drawable.ic_search, "Find in page") { openFind() }
+        add(R.drawable.ic_save_page, "Save page") { savePage() }
         add(R.drawable.ic_print, "Print / PDF") { printPage() }
-        add(R.drawable.ic_playlist_add, "Add to home") { addToDial() }
+
+        add(R.drawable.ic_dns, "DNS", Doh.endpoint.isNotEmpty()) { dnsDialog() }
+        add(R.drawable.ic_shield, "Ad blocker", adblockOn) { adBlockDialog() }
+        add(R.drawable.ic_pick, "Block area") { startPicker() }
         add(R.drawable.ic_image, "Block images", store.getBool("blockimg", false)) {
             val v = !store.getBool("blockimg", false)
             store.setBool("blockimg", v)
             for (t in tabs) applySettings(t)
+            val c = cur
+            if (c != null && !c.isHome) c.webView.reload()
             toast(if (v) "Images blocked" else "Images allowed")
         }
         add(R.drawable.ic_desktop, "Desktop", store.getBool("desktop", false)) { toggleDesktop() }
+
         add(R.drawable.ic_screenshot, "Screenshot") { screenshot() }
+        add(R.drawable.ic_screen_filter, "Screen filter", store.getInt("sf_mode", 0) != 0) { screenFilterDialog() }
         add(R.drawable.ic_brightness, "Brightness") { brightnessDialog() }
-        add(R.drawable.ic_text_size, "Text size") { cycleTextSize() }
+        add(R.drawable.ic_text_size, "Text size") { textSizeDialog() }
+        add(R.drawable.ic_text_zoom, "Text zoom in") { textZoomIn() }
+
+        add(R.drawable.ic_image_editor, "Image editor") { imageEditor() }
+        add(R.drawable.ic_one_hand, "One-handed mode", oneHand) { toggleOneHand() }
         add(R.drawable.ic_code, "Page source") { pageSource() }
+        add(R.drawable.ic_memo, "Memo") { memo() }
         add(R.drawable.ic_delete, "Clear data") { clearData() }
-        add(R.drawable.ic_power, "Exit") { finishAffinity() }
+
+        add(R.drawable.ic_refresh, "Update ad lists") { updateAdLists() }
+        add(R.drawable.ic_mic, "Voice search") { voiceSearch() }
+        add(R.drawable.ic_copy, "Copy link") { copyLink() }
+
+        fun bar(items: List<BarItem>): LinearLayout {
+            val row = LinearLayout(this)
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setPadding(dp(14), dp(4), dp(14), dp(4))
+            for (item in items) {
+                val act = item.action
+                val b = iconButton(item.res, 56, 48, 24, item.color)
+                b.layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+                b.setOnClickListener {
+                    dlg.dismiss()
+                    act()
+                }
+                row.addView(b)
+            }
+            return row
+        }
+
+        fun divider(): View {
+            val d = View(this)
+            d.setBackgroundColor(0xFF333333.toInt())
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
+            lp.setMargins(dp(14), 0, dp(14), 0)
+            d.layoutParams = lp
+            return d
+        }
+
+        val header = bar(
+            listOf(
+                BarItem(R.drawable.ic_refresh, Color.WHITE) {
+                    val c = cur
+                    if (c != null && !c.isHome) c.webView.reload() else toast("Open a page first")
+                },
+                BarItem(R.drawable.ic_shield, if (adblockOn) on else Color.WHITE) { adBlockDialog() },
+                BarItem(R.drawable.ic_tabs, Color.WHITE) { showTabs() },
+                BarItem(R.drawable.ic_settings, Color.WHITE) { openSettings() }
+            )
+        )
+        val footer = bar(
+            listOf(
+                BarItem(R.drawable.ic_incognito, Color.WHITE) { selectTab(newTab(true)) },
+                BarItem(R.drawable.ic_moon, if (store.getBool("dark", false)) on else Color.WHITE) { toggleDark() },
+                BarItem(R.drawable.ic_bookmark, Color.WHITE) { openItems("bookmark") },
+                BarItem(R.drawable.ic_reader, Color.WHITE) { readerMode() },
+                BarItem(R.drawable.ic_power, Color.WHITE) { finishAffinity() }
+            )
+        )
 
         val sv = ScrollView(this)
+        sv.addView(grid)
+        val sheet = LinearLayout(this)
+        sheet.orientation = LinearLayout.VERTICAL
         val sheetBg = GradientDrawable()
         sheetBg.setColor(0xFF1F1F1F.toInt())
         val r = dp(28).toFloat()
         sheetBg.cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
-        sv.background = sheetBg
-        sv.addView(grid)
-        dlg.setContentView(sv)
+        sheet.background = sheetBg
+        sheet.addView(header)
+        sheet.addView(divider())
+        sheet.addView(
+            sv,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.62f).toInt()
+            )
+        )
+        sheet.addView(divider())
+        sheet.addView(footer)
+        dlg.setContentView(sheet)
         dlg.show()
         dlg.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
             ?.setBackgroundColor(Color.TRANSPARENT)
@@ -1078,13 +1260,44 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun cycleTextSize() {
-        val now = store.getInt("zoom", 100)
-        val idx = ZOOMS.indexOf(now)
-        val next = ZOOMS[(idx + 1) % ZOOMS.size]
-        store.setInt("zoom", next)
+    private fun textSizeDialog() {
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(24), dp(20), dp(24), dp(8))
+        val label = tv("Text size: " + store.getInt("zoom", 100) + "%", 15f)
+        box.addView(label)
+        val sb = SeekBar(this)
+        sb.max = 50
+        sb.progress = ((store.getInt("zoom", 100) - 50) / 5).coerceIn(0, 50)
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                val z = 50 + p * 5
+                store.setInt("zoom", z)
+                label.text = "Text size: $z%"
+                for (t in tabs) applySettings(t)
+            }
+
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(sb)
+        AlertDialog.Builder(this)
+            .setTitle("Text size")
+            .setView(box)
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Reset") { _, _ ->
+                store.setInt("zoom", 100)
+                for (t in tabs) applySettings(t)
+                toast("Text size 100%")
+            }
+            .show()
+    }
+
+    private fun textZoomIn() {
+        val z = minOf(300, store.getInt("zoom", 100) + 10)
+        store.setInt("zoom", z)
         for (t in tabs) applySettings(t)
-        toast("Text size $next%")
+        toast("Text zoom $z%")
     }
 
     private fun pageSource() {
@@ -1126,6 +1339,706 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ------------------------------------------------------------------ images
+
+    private fun collectImages(cb: (List<String>) -> Unit) {
+        val t = cur
+        if (t == null || t.isHome) {
+            toast("Open a page first")
+            return
+        }
+        t.webView.evaluateJavascript(PageJs.IMAGES) { r ->
+            val list = mutableListOf<String>()
+            try {
+                val arr = JSONArray(JSONArray("[$r]").getString(0))
+                for (i in 0 until arr.length()) list.add(arr.getString(i))
+            } catch (_: Exception) {
+            }
+            val clean = list
+            ImageHolder.referer = t.url
+            ImageHolder.ua = t.webView.settings.userAgentString ?: ""
+            cb(clean)
+        }
+    }
+
+    private fun imageViewer() {
+        collectImages { l ->
+            if (l.isEmpty()) {
+                toast("No images found on this page")
+            } else {
+                ImageHolder.urls = l
+                startActivity(Intent(this, ImagesActivity::class.java))
+            }
+        }
+    }
+
+    private fun saveAllImages() {
+        collectImages { l ->
+            if (l.isEmpty()) {
+                toast("No images found on this page")
+                return@collectImages
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Save all images")
+                .setMessage("Save " + l.size + " images to Pictures/AuraBrowser?")
+                .setPositiveButton("Save") { _, _ ->
+                    val pd = AlertDialog.Builder(this)
+                        .setTitle("Saving images")
+                        .setMessage("0 / " + l.size)
+                        .setCancelable(false)
+                        .show()
+                    ImgNet.saveAll(this, l, { n, total ->
+                        pd.setMessage("$n / $total")
+                    }, { ok, total ->
+                        pd.dismiss()
+                        toast("Saved $ok of $total images")
+                    })
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun imageEditor() {
+        val t = cur
+        val labels = mutableListOf("Choose from gallery")
+        if (t != null && !t.isHome) labels.add("Choose from this page's images")
+        AlertDialog.Builder(this)
+            .setTitle("Image editor")
+            .setItems(labels.toTypedArray()) { _, w ->
+                if (w == 0) {
+                    startActivity(Intent(this, ImageEditorActivity::class.java))
+                } else {
+                    toast("Open an image and tap Edit")
+                    imageViewer()
+                }
+            }
+            .show()
+    }
+
+    // ------------------------------------------------------------------ read aloud / text to speech
+
+    private fun ensureSpeech(): SpeechController {
+        var s = speech
+        if (s == null) {
+            s = SpeechController(this) { playing -> updateReadBar(playing) }
+            s.setRate(store.getInt("tts_rate", 100) / 100f)
+            s.setPitch(store.getInt("tts_pitch", 100) / 100f)
+            speech = s
+        }
+        return s
+    }
+
+    private fun applyVoiceLang(s: SpeechController, pageLang: String) {
+        val chosen = store.getStr("tts_lang", "")
+        val use = if (chosen.isNotEmpty()) chosen else pageLang
+        if (use.isEmpty()) {
+            s.setLanguage(null)
+        } else if (!s.setLanguage(use)) {
+            toast("Voice for '$use' is not installed; using default")
+            s.setLanguage(null)
+        }
+    }
+
+    private fun readAloud() {
+        val t = cur
+        if (t == null || t.isHome) {
+            toast("Open a page first")
+            return
+        }
+        t.webView.evaluateJavascript(PageJs.TEXT) { r ->
+            try {
+                val j = JSONObject(JSONArray("[$r]").getString(0))
+                val text = j.optString("t").trim()
+                if (text.length < 2) {
+                    toast("Nothing to read on this page")
+                    return@evaluateJavascript
+                }
+                val s = ensureSpeech()
+                applyVoiceLang(s, j.optString("l"))
+                s.speak(text)
+                showReadBar()
+                toast(if (j.optBoolean("s")) "Reading selected text" else "Reading page")
+            } catch (e: Exception) {
+                toast("Read aloud failed")
+            }
+        }
+    }
+
+    private fun showReadBar() {
+        if (readBar != null) return
+        val bar = LinearLayout(this)
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setPadding(dp(8), dp(4), dp(8), dp(4))
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(28).toFloat()
+        bg.setColor(0xF0262630.toInt())
+        bar.background = bg
+        bar.elevation = dp(8).toFloat()
+
+        fun b(text: String, action: () -> Unit): TextView {
+            val t = tv(text, 14f)
+            t.setPadding(dp(14), dp(10), dp(14), dp(10))
+            t.setOnClickListener { action() }
+            bar.addView(t)
+            return t
+        }
+
+        readPlay = b("Pause") {
+            val s = speech
+            if (s != null) {
+                if (s.playing) s.pause() else s.resume()
+            }
+        }
+        val speeds = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+        var speedBtn: TextView? = null
+        speedBtn = b(String.format("%.2fx", speech?.rate ?: 1f)) {
+            val s = speech
+            if (s != null) {
+                val i = speeds.indexOfFirst { Math.abs(it - s.rate) < 0.01f }
+                val nx = speeds[(i + 1) % speeds.size]
+                val was = s.playing
+                if (was) s.pause()
+                s.setRate(nx)
+                store.setInt("tts_rate", (nx * 100).toInt())
+                speedBtn?.text = String.format("%.2fx", nx)
+                if (was) s.resume()
+            }
+        }
+        b("Stop") {
+            speech?.stop()
+            hideReadBar()
+        }
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        )
+        lp.bottomMargin = dp(16)
+        content.addView(bar, lp)
+        readBar = bar
+    }
+
+    private fun hideReadBar() {
+        readBar?.let { content.removeView(it) }
+        readBar = null
+        readPlay = null
+    }
+
+    private fun updateReadBar(playing: Boolean) {
+        readPlay?.text = if (playing) "Pause" else "Play"
+    }
+
+    private fun ttsDialog() {
+        val t = cur
+        if (t != null && !t.isHome) {
+            t.webView.evaluateJavascript(PageJs.SELECTION) { r ->
+                val sel = try {
+                    JSONArray("[$r]").getString(0)
+                } catch (e: Exception) {
+                    ""
+                }
+                openTts(if (sel == "null") "" else sel)
+            }
+        } else {
+            openTts("")
+        }
+    }
+
+    private fun openTts(initial: String) {
+        var text = initial
+        if (text.isBlank()) {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            text = cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() ?: ""
+        }
+        val s = ensureSpeech()
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(20), dp(10), dp(20), 0)
+        val input = EditText(this)
+        input.hint = "Type or paste text to speak"
+        input.setText(text)
+        input.minLines = 4
+        input.maxLines = 8
+        input.gravity = Gravity.TOP
+        input.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        box.addView(input)
+
+        val rateLabel = tv("Speed: " + String.format("%.2fx", store.getInt("tts_rate", 100) / 100f), 13f, 0xFFBBBBBB.toInt())
+        rateLabel.setPadding(0, dp(12), 0, 0)
+        box.addView(rateLabel)
+        val rateBar = SeekBar(this)
+        rateBar.max = 150
+        rateBar.progress = (store.getInt("tts_rate", 100) - 50).coerceIn(0, 150)
+        rateBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                val v = 50 + p
+                store.setInt("tts_rate", v)
+                s.setRate(v / 100f)
+                rateLabel.text = "Speed: " + String.format("%.2fx", v / 100f)
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+        box.addView(rateBar)
+
+        val pitchLabel = tv("Pitch: " + String.format("%.2f", store.getInt("tts_pitch", 100) / 100f), 13f, 0xFFBBBBBB.toInt())
+        box.addView(pitchLabel)
+        val pitchBar = SeekBar(this)
+        pitchBar.max = 150
+        pitchBar.progress = (store.getInt("tts_pitch", 100) - 50).coerceIn(0, 150)
+        pitchBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                val v = 50 + p
+                store.setInt("tts_pitch", v)
+                s.setPitch(v / 100f)
+                pitchLabel.text = "Pitch: " + String.format("%.2f", v / 100f)
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+        box.addView(pitchBar)
+
+        val langLabel = tv("Language", 13f, 0xFFBBBBBB.toInt())
+        langLabel.setPadding(0, dp(8), 0, 0)
+        box.addView(langLabel)
+        val spin = Spinner(this)
+        spin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, TTS_LANGS.map { it.first })
+        val curLang = store.getStr("tts_lang", "")
+        spin.setSelection(TTS_LANGS.indexOfFirst { it.second == curLang }.coerceAtLeast(0))
+        spin.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                store.setStr("tts_lang", TTS_LANGS[pos].second)
+            }
+
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        box.addView(spin)
+
+        val row = LinearLayout(this)
+        row.setPadding(0, dp(12), 0, dp(4))
+        fun btn(label: String, action: () -> Unit) {
+            val b = tv(label, 14f)
+            val bg = GradientDrawable()
+            bg.cornerRadius = dp(20).toFloat()
+            bg.setColor(0xFF2F3140.toInt())
+            b.background = bg
+            b.gravity = Gravity.CENTER
+            b.setPadding(dp(8), dp(10), dp(8), dp(10))
+            b.setOnClickListener { action() }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            lp.marginEnd = dp(6)
+            row.addView(b, lp)
+        }
+        btn("Speak") {
+            val x = input.text.toString().trim()
+            if (x.isEmpty()) {
+                toast("Enter some text")
+            } else {
+                applyVoiceLang(s, "")
+                s.speak(x)
+            }
+        }
+        btn("Stop") { s.stop() }
+        btn("Save audio") {
+            val x = input.text.toString().trim()
+            if (x.isEmpty()) {
+                toast("Enter some text")
+            } else {
+                applyVoiceLang(s, "")
+                toast("Creating audio…")
+                s.synthToFile(x) { f ->
+                    if (f == null) {
+                        toast("Could not create audio")
+                    } else {
+                        val ok = FileSaver.audioToMusic(this, "aura_tts_" + System.currentTimeMillis() + ".wav", f)
+                        f.delete()
+                        toast(if (ok) "Saved to Music/AuraBrowser" else "Could not save audio")
+                    }
+                }
+            }
+        }
+        box.addView(row)
+
+        val sv = ScrollView(this)
+        sv.addView(box)
+        AlertDialog.Builder(this)
+            .setTitle("Text to Speech")
+            .setView(sv)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    // ------------------------------------------------------------------ save page
+
+    private fun savePage() {
+        val t = cur
+        if (t == null || t.isHome || !t.url.startsWith("http")) {
+            toast("Open a page first")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Save page")
+            .setItems(arrayOf("Web archive (.mht, single file)", "HTML (.html)", "PDF (via print)")) { _, w ->
+                when (w) {
+                    0 -> saveArchive(t)
+                    1 -> saveHtml(t)
+                    else -> printPage()
+                }
+            }
+            .show()
+    }
+
+    private fun saveArchive(t: BTab) {
+        val name = FileSaver.safeName(t.title.ifBlank { hostOf(t.url) })
+        val f = java.io.File(cacheDir, "page_" + System.currentTimeMillis() + ".mht")
+        t.webView.saveWebArchive(f.absolutePath, false) { p ->
+            if (p == null) {
+                toast("Could not save page")
+                return@saveWebArchive
+            }
+            Thread {
+                val ok = FileSaver.fileToDownloads(applicationContext, "$name.mht", "multipart/related", f)
+                f.delete()
+                runOnUiThread { toast(if (ok) "Saved to Downloads/AuraBrowser" else "Save failed") }
+            }.start()
+        }
+    }
+
+    private fun saveHtml(t: BTab) {
+        val name = FileSaver.safeName(t.title.ifBlank { hostOf(t.url) })
+        val pageUrl = t.url
+        t.webView.evaluateJavascript("'<!DOCTYPE html>'+document.documentElement.outerHTML") { r ->
+            var html = try {
+                JSONArray("[$r]").getString(0)
+            } catch (e: Exception) {
+                ""
+            }
+            if (html.length < 30) {
+                toast("Could not read the page")
+                return@evaluateJavascript
+            }
+            val m = Regex("(?i)<head[^>]*>").find(html)
+            if (m != null) {
+                val at = m.range.last + 1
+                html = html.substring(0, at) + "<base href=\"" + pageUrl + "\">" + html.substring(at)
+            }
+            val data = html.toByteArray()
+            Thread {
+                val ok = FileSaver.toDownloads(applicationContext, "$name.html", "text/html", data)
+                runOnUiThread { toast(if (ok) "Saved to Downloads/AuraBrowser" else "Save failed") }
+            }.start()
+        }
+    }
+
+    // ------------------------------------------------------------------ DNS
+
+    private fun dnsBlockedPage(host: String): String =
+        "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>" +
+            "<body style='background:#000;color:#eee;font-family:sans-serif;padding:32px;text-align:center'>" +
+            "<h2>Blocked by DNS filter</h2><p>" + escHtml(host) +
+            "</p><p style='color:#888'>Your DNS provider blocks this site. Change it from Menu &gt; DNS.</p></body></html>"
+
+    private fun dnsDialog() {
+        val names = listOf(
+            "Off (system DNS)",
+            "Cloudflare Security (malware)",
+            "Cloudflare Family (malware + adult)",
+            "AdGuard DNS (ads + trackers)",
+            "Google Public DNS (no filtering)",
+            "Custom DoH (JSON) URL…"
+        )
+        val urls = listOf(
+            "",
+            "https://security.cloudflare-dns.com/dns-query",
+            "https://family.cloudflare-dns.com/dns-query",
+            "https://dns.adguard-dns.com/resolve",
+            "https://dns.google/resolve",
+            ""
+        )
+        val saved = store.getStr("dns_url", "")
+        var checked = urls.indexOf(saved).let { if (it < 0 || (it == 0 && saved.isNotEmpty())) 5 else it }
+        if (saved.isEmpty()) checked = 0
+
+        fun applyDns(u: String, label: String) {
+            store.setStr("dns_url", u)
+            Doh.endpoint = u
+            Doh.clear()
+            toast(if (u.isEmpty()) "DNS filter off" else "DNS filter: $label")
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("DNS filter")
+            .setSingleChoiceItems(names.toTypedArray(), checked) { d, which ->
+                d.dismiss()
+                if (which == 5) {
+                    val e = EditText(this)
+                    e.hint = "https://example.com/resolve"
+                    e.setText(if (saved.isNotEmpty() && !urls.contains(saved)) saved else "")
+                    e.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+                    val bx = LinearLayout(this)
+                    bx.setPadding(dp(20), dp(8), dp(20), 0)
+                    bx.addView(e, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    AlertDialog.Builder(this)
+                        .setTitle("Custom DoH URL")
+                        .setView(bx)
+                        .setPositiveButton("OK") { _, _ ->
+                            val v = e.text.toString().trim()
+                            if (v.isNotEmpty()) applyDns(normalizeUrl(v), "custom")
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                } else {
+                    applyDns(urls[which], names[which])
+                }
+            }
+            .setNeutralButton("System DNS") { _, _ ->
+                toast("Open Network & internet > Private DNS")
+                try {
+                    startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                } catch (e: Exception) {
+                    try {
+                        startActivity(Intent(Settings.ACTION_SETTINGS))
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            .setNegativeButton("Test") { _, _ ->
+                val ep = Doh.endpoint
+                if (ep.isEmpty()) {
+                    toast("Choose a DNS provider first")
+                } else {
+                    Thread {
+                        val r = Doh.test(ep)
+                        runOnUiThread { toast(r) }
+                    }.start()
+                }
+            }
+            .show()
+    }
+
+    // ------------------------------------------------------------------ screen filter
+
+    private fun screenFilterDialog() {
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(24), dp(16), dp(24), dp(8))
+        val spin = Spinner(this)
+        spin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, SF_NAMES)
+        spin.setSelection(store.getInt("sf_mode", 0).coerceIn(0, SF_NAMES.size - 1))
+        box.addView(spin)
+        val label = tv("Strength: " + store.getInt("sf_level", 40) + "%", 13f, 0xFFBBBBBB.toInt())
+        label.setPadding(0, dp(14), 0, 0)
+        box.addView(label)
+        val sb = SeekBar(this)
+        sb.max = 100
+        sb.progress = store.getInt("sf_level", 40)
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                store.setInt("sf_level", p)
+                label.text = "Strength: $p%"
+                applyScreenFilter()
+            }
+
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(sb)
+        spin.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                store.setInt("sf_mode", pos)
+                applyScreenFilter()
+            }
+
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Screen filter")
+            .setView(box)
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Turn off") { _, _ ->
+                store.setInt("sf_mode", 0)
+                applyScreenFilter()
+            }
+            .show()
+    }
+
+    private fun applyScreenFilter() {
+        val mode = store.getInt("sf_mode", 0).coerceIn(0, SF_COLORS.size - 1)
+        val level = store.getInt("sf_level", 40)
+        val host = findViewById<ViewGroup>(android.R.id.content)
+        var v = filterView
+        if (mode == 0) {
+            if (v != null) {
+                host.removeView(v)
+                filterView = null
+            }
+            return
+        }
+        if (v == null) {
+            v = View(this)
+            v.isClickable = false
+            v.isFocusable = false
+            host.addView(v, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            filterView = v
+        }
+        val a = (level / 100f * 0.7f * 255f).toInt().coerceIn(0, 255)
+        v.setBackgroundColor((a shl 24) or (SF_COLORS[mode] and 0xFFFFFF))
+    }
+
+    // ------------------------------------------------------------------ one-handed mode
+
+    private fun toggleOneHand() {
+        if (oneHand) exitOneHand() else enterOneHand()
+    }
+
+    private fun enterOneHand() {
+        val host = findViewById<ViewGroup>(android.R.id.content)
+        val root = host.getChildAt(0)
+        oneHand = true
+        placePivot(root)
+        root.animate().scaleX(0.76f).scaleY(0.76f).setDuration(200).start()
+
+        val panel = LinearLayout(this)
+        panel.gravity = Gravity.CENTER
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(26).toFloat()
+        bg.setColor(0xFF262630.toInt())
+        panel.background = bg
+        panel.setPadding(dp(6), dp(4), dp(6), dp(4))
+        fun b(text: String, action: () -> Unit) {
+            val t = tv(text, 14f)
+            t.setPadding(dp(16), dp(10), dp(16), dp(10))
+            t.setOnClickListener { action() }
+            panel.addView(t)
+        }
+        b("Switch side") {
+            store.setInt("oh_side", if (store.getInt("oh_side", 1) == 1) 0 else 1)
+            placePivot(root)
+            root.invalidate()
+        }
+        b("Exit") { exitOneHand() }
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        )
+        lp.topMargin = dp(90)
+        host.addView(panel, lp)
+        handPanel = panel
+        toast("One-handed mode on")
+    }
+
+    private fun placePivot(root: View) {
+        val right = store.getInt("oh_side", 1) == 1
+        root.pivotX = if (right) root.width.toFloat() else 0f
+        root.pivotY = root.height.toFloat()
+    }
+
+    private fun exitOneHand() {
+        val host = findViewById<ViewGroup>(android.R.id.content)
+        val root = host.getChildAt(0)
+        oneHand = false
+        root.animate().scaleX(1f).scaleY(1f).setDuration(180).start()
+        handPanel?.let { host.removeView(it) }
+        handPanel = null
+    }
+
+    // ------------------------------------------------------------------ memo
+
+    private fun memo() {
+        val t = cur
+        if (t == null || t.isHome || !t.url.startsWith("http")) {
+            itemsLauncher.launch(Intent(this, MemoActivity::class.java))
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Memo")
+            .setItems(arrayOf("New memo for this page", "All memos")) { _, w ->
+                if (w == 1) {
+                    itemsLauncher.launch(Intent(this, MemoActivity::class.java))
+                } else {
+                    t.webView.evaluateJavascript(PageJs.SELECTION) { r ->
+                        val sel = try {
+                            JSONArray("[$r]").getString(0)
+                        } catch (e: Exception) {
+                            ""
+                        }
+                        val i = Intent(this, MemoActivity::class.java)
+                        i.putExtra("new", true)
+                        i.putExtra("newTitle", t.title)
+                        i.putExtra("newUrl", t.url)
+                        i.putExtra("newText", if (sel == "null") "" else sel)
+                        itemsLauncher.launch(i)
+                    }
+                }
+            }
+            .show()
+    }
+
+    // ------------------------------------------------------------------ add current page
+
+    private fun addCurrentPage() {
+        val t = cur
+        if (t == null || t.isHome || !t.url.startsWith("http")) {
+            addToDial()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Add current page")
+            .setItems(arrayOf("Home shortcuts", "Bookmarks", "Phone home screen")) { _, w ->
+                when (w) {
+                    0 -> addShortcutDialog(t.title, t.url)
+                    1 -> {
+                        if (store.isBookmarked(t.url)) {
+                            toast("Already in bookmarks")
+                        } else {
+                            store.addBookmark(t.title, t.url)
+                            toast("Bookmarked")
+                            updateUi()
+                        }
+                    }
+                    else -> pinToLauncher(t)
+                }
+            }
+            .show()
+    }
+
+    private fun pinToLauncher(t: BTab) {
+        if (!ShortcutManagerCompat.isRequestPinShortcutSupported(this)) {
+            toast("Your launcher does not support pinned shortcuts")
+            return
+        }
+        val host = hostOf(t.url)
+        val fav = FaviconCache.get(this, host)
+        val size = dp(96)
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.color = 0xFF2A2A33.toInt()
+        c.drawCircle(size / 2f, size / 2f, size / 2f, p)
+        if (fav != null) {
+            val inner = (size * 0.6f).toInt()
+            val sc = Bitmap.createScaledBitmap(fav, inner, inner, true)
+            c.drawBitmap(sc, (size - inner) / 2f, (size - inner) / 2f, null)
+        } else {
+            p.color = Color.WHITE
+            p.textSize = size * 0.5f
+            p.textAlign = Paint.Align.CENTER
+            val ch = (t.title.firstOrNull { it.isLetterOrDigit() } ?: host.firstOrNull() ?: 'A').uppercaseChar().toString()
+            c.drawText(ch, size / 2f, size / 2f + p.textSize * 0.35f, p)
+        }
+        val intent = Intent(this, MainActivity::class.java)
+        intent.action = Intent.ACTION_VIEW
+        intent.data = Uri.parse(t.url)
+        val info = ShortcutInfoCompat.Builder(this, "pg" + t.url.hashCode())
+            .setShortLabel(t.title.ifBlank { host }.take(24))
+            .setIcon(IconCompat.createWithBitmap(bmp))
+            .setIntent(intent)
+            .build()
+        ShortcutManagerCompat.requestPinShortcut(this, info, null)
+    }
+
     // ------------------------------------------------------------------ full screen
 
     private fun setFullscreen(on: Boolean) {
@@ -1151,10 +2064,8 @@ class MainActivity : AppCompatActivity() {
     private fun loadPrefs() {
         adblockOn = store.getBool("adblock", true)
         popupBlock = store.getBool("popup", true)
-        adultOn = store.getBool("adult", true)
         cosmetic = store.getBool("cosmetic", true)
         adDomains = store.strings("addom").toHashSet()
-        adultDomains = store.strings("adultdom").toHashSet()
         adAllow = store.strings("adallow").toHashSet()
     }
 
@@ -1173,37 +2084,12 @@ class MainActivity : AppCompatActivity() {
             imm.showSoftInput(urlBar, InputMethodManager.SHOW_IMPLICIT)
         }
         homeMic.setOnClickListener { voiceSearch() }
-        quickRow.removeAllViews()
-        fun q(icon: Int, label: String, action: () -> Unit) {
-            val cell = LinearLayout(this)
-            cell.orientation = LinearLayout.VERTICAL
-            cell.gravity = Gravity.CENTER_HORIZONTAL
-            val circle = GradientDrawable()
-            circle.shape = GradientDrawable.OVAL
-            circle.setColor(0xFF1E1E24.toInt())
-            val ic = iconButton(icon, 52, 52, 24)
-            ic.background = circle
-            val l = tv(label, 12f, 0xFFAAAAAA.toInt())
-            l.gravity = Gravity.CENTER
-            l.maxLines = 1
-            l.setPadding(0, dp(6), 0, 0)
-            cell.addView(ic)
-            cell.addView(l)
-            cell.setOnClickListener { action() }
-            quickRow.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        q(R.drawable.ic_download, "Downloads") { openDownloads() }
-        q(R.drawable.ic_bookmark, "Bookmarks") { openItems("bookmark") }
-        q(R.drawable.ic_history, "History") { openItems("history") }
-        q(R.drawable.ic_shield, "Ad block") { adBlockDialog() }
-        q(R.drawable.ic_settings, "Settings") { openSettings() }
         updateHomeStatus()
     }
 
     private fun updateHomeStatus() {
         val total = store.getBlockedTotal() + pendingBlocked.get()
-        homeStatus.text = "Ads: " + (if (adblockOn) "ON" else "OFF") +
-            "   •   Adult block: " + (if (adultOn) "ON" else "OFF") +
+        homeStatus.text = "Ad blocker: " + (if (adblockOn) "ON" else "OFF") +
             "   •   " + total + " blocked"
     }
 
@@ -1224,10 +2110,6 @@ class MainActivity : AppCompatActivity() {
     private fun startDownload(url: String, ua: String?, cd: String?, mime: String?) {
         if (!url.startsWith("http")) {
             toast("This link type cannot be downloaded")
-            return
-        }
-        if (adultOn && AdultFilter.isBlocked(url, adultDomains)) {
-            toast("Blocked")
             return
         }
         try {
@@ -1356,6 +2238,8 @@ class MainActivity : AppCompatActivity() {
                 t?.webView?.reload()
             }
         }
+        labels.add("Update ad lists (" + AdLists.count + " extra domains)")
+        acts.add { updateAdLists() }
         labels.add("Hidden elements (" + store.strings("hide").size + ")")
         acts.add { openList("hide") }
         labels.add("Blocked domains (" + store.strings("addom").size + ")")
@@ -1413,19 +2297,22 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ adult block / pin
 
-    private fun toggleAdult() {
-        if (adultOn) {
-            askPin {
-                adultOn = false
-                store.setBool("adult", false)
-                updateHomeStatus()
-                toast("Adult site block OFF")
+    private fun isAdHost(host: String): Boolean =
+        AdBlock.matches(host, AdBlock.SET) || AdBlock.matches(host, AdLists.set) ||
+            AdBlock.matches(host, adDomains)
+
+    private fun injectAnti(t: BTab) {
+        if (!adblockOn || !t.url.startsWith("http")) return
+        if (adAllow.contains(normHost(hostOf(t.url)))) return
+        t.webView.evaluateJavascript(AdBlock.ANTI_JS, null)
+    }
+
+    private fun updateAdLists() {
+        toast("Updating ad lists...")
+        AdLists.update(applicationContext) { n ->
+            runOnUiThread {
+                toast(if (n > 0) "Ad lists updated: $n domains" else "Update failed - check internet")
             }
-        } else {
-            adultOn = true
-            store.setBool("adult", true)
-            updateHomeStatus()
-            toast("Adult site block ON")
         }
     }
 

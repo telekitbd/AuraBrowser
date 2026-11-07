@@ -184,14 +184,6 @@
                         android:tint="#9FA8FF" />
                 </LinearLayout>
 
-                <LinearLayout
-                    android:id="@+id/quickRow"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="22dp"
-                    android:orientation="horizontal"
-                    android:paddingStart="8dp"
-                    android:paddingEnd="8dp" />
 
                 <TextView
                     android:id="@+id/homeStatus"

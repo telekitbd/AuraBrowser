@@ -9,6 +9,8 @@ data class Item(val title: String, val url: String, val time: Long)
 
 data class DlItem(val id: Long, val name: String, val url: String, val time: Long)
 
+data class Memo(val id: Long, val title: String, val body: String, val url: String, val time: Long)
+
 class BTab(val webView: WebView, val incognito: Boolean) {
     var isHome = true
     var title = "Home"
@@ -219,5 +221,40 @@ class Store(ctx: Context) {
     fun getInt(key: String, def: Int): Int = sp.getInt("s_$key", def)
     fun setInt(key: String, v: Int) {
         sp.edit().putInt("s_$key", v).apply()
+    }
+
+    // ---- memos ----
+    fun getMemos(): MutableList<Memo> {
+        val out = mutableListOf<Memo>()
+        try {
+            val arr = JSONArray(sp.getString("memos", "[]"))
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(Memo(o.optLong("i"), o.optString("t"), o.optString("b"), o.optString("u"), o.optLong("d")))
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun writeMemos(list: List<Memo>) {
+        val arr = JSONArray()
+        for (m in list) {
+            arr.put(JSONObject().put("i", m.id).put("t", m.title).put("b", m.body).put("u", m.url).put("d", m.time))
+        }
+        sp.edit().putString("memos", arr.toString()).apply()
+    }
+
+    fun saveMemo(m: Memo) {
+        val l = getMemos()
+        l.removeAll { it.id == m.id }
+        l.add(0, m.copy(time = System.currentTimeMillis()))
+        writeMemos(l)
+    }
+
+    fun removeMemo(id: Long) {
+        val l = getMemos()
+        l.removeAll { it.id == id }
+        writeMemos(l)
     }
 }
