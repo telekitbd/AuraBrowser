@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.text.TextUtils
@@ -66,17 +67,13 @@ class ItemsActivity : AppCompatActivity() {
         bar.gravity = Gravity.CENTER_VERTICAL
         bar.setPadding(dp(4), 0, dp(4), 0)
 
-        val back = tv("←", 24f)
-        back.gravity = Gravity.CENTER
+        val back = iconButton(R.drawable.ic_arrow_back, 48, 56)
         back.setOnClickListener { finish() }
         val title = tv(if (isBm) "Bookmark" else "History", 22f)
         title.setPadding(dp(8), 0, 0, 0)
-        val btnAdd = tv("＋", 26f)
-        btnAdd.gravity = Gravity.CENTER
-        val btnSearch = tv("🔍", 20f)
-        btnSearch.gravity = Gravity.CENTER
-        val btnMore = tv("⋮", 26f)
-        btnMore.gravity = Gravity.CENTER
+        val btnAdd = iconButton(R.drawable.ic_add, 48, 56)
+        val btnSearch = iconButton(R.drawable.ic_search, 48, 56)
+        val btnMore = iconButton(R.drawable.ic_more_vert, 48, 56)
 
         bar.addView(back, LinearLayout.LayoutParams(dp(48), dp(56)))
         bar.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -96,7 +93,11 @@ class ItemsActivity : AppCompatActivity() {
         listView = ListView(this)
         listView.divider = ColorDrawable(0xFF333333.toInt())
         listView.dividerHeight = 1
-        listView.setBackgroundColor(0xFF1C1C1C.toInt())
+        val listBg = GradientDrawable()
+        listBg.setColor(0xFF1E1E1E.toInt())
+        listBg.cornerRadius = dp(24).toFloat()
+        listView.background = listBg
+        listView.clipToOutline = true
         adapter = ItemsAdapter()
         listView.adapter = adapter
 
@@ -112,7 +113,9 @@ class ItemsActivity : AppCompatActivity() {
         root.addView(bar)
         root.addView(searchBox)
         root.addView(emptyView)
-        root.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val listLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        listLp.setMargins(dp(10), dp(6), dp(10), dp(6))
+        root.addView(listView, listLp)
         root.addView(bottom, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         setContentView(root)
 
@@ -267,7 +270,8 @@ class ItemsActivity : AppCompatActivity() {
             row.gravity = Gravity.CENTER_VERTICAL
             row.setPadding(dp(14), dp(10), dp(4), dp(10))
 
-            val icon = letterIcon(hostOf(item.url), 40)
+            val icon = siteIcon(item.title, item.url, 40)
+            FaviconCache.ensure(this@ItemsActivity, hostOf(item.url)) { adapter.notifyDataSetChanged() }
             (icon.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
 
             val col = LinearLayout(this@ItemsActivity)
@@ -286,8 +290,7 @@ class ItemsActivity : AppCompatActivity() {
                 col.addView(sub)
             }
 
-            val more = tv("⋮", 22f)
-            more.setPadding(dp(14), dp(8), dp(14), dp(8))
+            val more = iconButton(R.drawable.ic_more_vert, 44, 44)
             more.setOnClickListener {
                 val pm = PopupMenu(this@ItemsActivity, more)
                 pm.menu.add(0, 1, 0, "Open in new tab")

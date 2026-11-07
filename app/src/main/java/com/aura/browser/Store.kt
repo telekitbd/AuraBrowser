@@ -13,6 +13,7 @@ class BTab(val webView: WebView, val incognito: Boolean) {
     var url = ""
     var loading = false
     var progress = 0
+    var thumb: android.graphics.Bitmap? = null
 }
 
 class Store(ctx: Context) {

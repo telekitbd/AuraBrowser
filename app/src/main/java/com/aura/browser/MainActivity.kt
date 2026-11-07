@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -35,6 +36,7 @@ import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -96,8 +98,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var topBar: LinearLayout
     private lateinit var bottomBar: LinearLayout
     private lateinit var tabCount: TextView
-    private lateinit var btnStar: TextView
-    private lateinit var btnRefresh: TextView
+    private lateinit var btnStar: ImageView
+    private lateinit var btnRefresh: ImageView
 
     private var fullscreen = false
     private var adblockOn = true
@@ -351,6 +353,14 @@ class MainActivity : AppCompatActivity() {
                 if (tab === cur) progress.progress = newProgress
             }
 
+            override fun onReceivedIcon(view: WebView, icon: Bitmap?) {
+                val u = view.url ?: return
+                if (icon != null && u.startsWith("http")) {
+                    FaviconCache.save(this@MainActivity, hostOf(u), icon)
+                    if (cur?.isHome == true) renderDial()
+                }
+            }
+
             override fun onReceivedTitle(view: WebView, title: String?) {
                 tab.title = title ?: tab.url
             }
@@ -415,6 +425,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectTab(t: BTab) {
+        cur?.let { captureThumb(it) }
         cur = t
         showContent()
         updateUi()
@@ -450,9 +461,9 @@ class MainActivity : AppCompatActivity() {
         val t = cur ?: return
         if (!urlBar.hasFocus()) urlBar.setText(if (t.isHome) "" else t.url)
         val marked = !t.isHome && store.isBookmarked(t.url)
-        btnStar.text = if (marked) "★" else "☆"
-        btnStar.setTextColor(if (marked) 0xFFFFC107.toInt() else Color.WHITE)
-        btnRefresh.text = if (t.loading && !t.isHome) "✕" else "⟳"
+        btnStar.setImageResource(if (marked) R.drawable.ic_star else R.drawable.ic_star_border)
+        btnStar.setColorFilter(if (marked) 0xFFFFC107.toInt() else Color.WHITE)
+        btnRefresh.setImageResource(if (t.loading && !t.isHome) R.drawable.ic_close else R.drawable.ic_refresh)
         progress.visibility = if (t.loading && !t.isHome) View.VISIBLE else View.GONE
         progress.progress = t.progress
         tabCount.text = tabs.size.toString()
@@ -526,7 +537,8 @@ class MainActivity : AppCompatActivity() {
             cell.orientation = LinearLayout.VERTICAL
             cell.gravity = Gravity.CENTER_HORIZONTAL
             cell.setPadding(0, dp(12), 0, dp(12))
-            cell.addView(letterIcon(d.title, 52))
+            cell.addView(siteIcon(d.title, d.url, 52))
+            FaviconCache.ensure(this, hostOf(d.url)) { renderDial() }
             val lbl = tv(d.title, 13f)
             lbl.maxLines = 1
             lbl.ellipsize = TextUtils.TruncateAt.END
@@ -603,82 +615,139 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ tabs dialog
 
+    private fun captureThumb(t: BTab) {
+        try {
+            if (t.isHome || t.webView.width <= 0 || t.webView.height <= 0) return
+            val w = t.webView.width / 3
+            val h = t.webView.height / 3
+            if (w <= 0 || h <= 0) return
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(bmp)
+            c.scale(1f / 3f, 1f / 3f)
+            t.webView.draw(c)
+            t.thumb = bmp
+        } catch (_: Exception) {
+        }
+    }
+
     private fun showTabs() {
+        cur?.let { captureThumb(it) }
         var priv = cur?.incognito == true
         val dlg = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
         val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+        val match = ViewGroup.LayoutParams.MATCH_PARENT
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(0xFF222222.toInt())
+        root.setBackgroundColor(0xFF1A1A1A.toInt())
 
         val head = LinearLayout(this)
         head.orientation = LinearLayout.HORIZONTAL
-        val tNormal = tv("😀  Normal", 16f)
-        tNormal.gravity = Gravity.CENTER
-        tNormal.setPadding(0, dp(18), 0, dp(14))
-        val tPriv = tv("🕶  Private", 16f)
-        tPriv.gravity = Gravity.CENTER
-        tPriv.setPadding(0, dp(18), 0, dp(14))
+        head.setPadding(0, dp(16), 0, dp(4))
+
+        fun tabBtn(res: Int): LinearLayout {
+            val l = LinearLayout(this)
+            l.gravity = Gravity.CENTER
+            l.setPadding(0, dp(12), 0, dp(12))
+            l.addView(iconView(res, 26))
+            return l
+        }
+
+        val tNormal = tabBtn(R.drawable.ic_face)
+        val tPriv = tabBtn(R.drawable.ic_incognito)
         head.addView(tNormal, LinearLayout.LayoutParams(0, wrap, 1f))
         head.addView(tPriv, LinearLayout.LayoutParams(0, wrap, 1f))
 
-        val list = LinearLayout(this)
-        list.orientation = LinearLayout.VERTICAL
+        val grid = GridLayout(this)
+        grid.columnCount = 2
+        grid.setPadding(dp(10), dp(8), dp(10), dp(8))
         val sv = ScrollView(this)
-        sv.addView(list)
+        sv.addView(grid)
+        val cardW = (resources.displayMetrics.widthPixels - dp(20)) / 2
 
         val foot = LinearLayout(this)
         foot.orientation = LinearLayout.HORIZONTAL
-        val bDel = tv("Delete all", 18f)
+        foot.setBackgroundColor(0xFF1A1A1A.toInt())
+        val bDel = tv("Delete all", 17f)
         bDel.gravity = Gravity.CENTER
         bDel.setPadding(0, dp(18), 0, dp(18))
-        val bNew = tv("New tab", 18f)
+        val bNew = tv("New tab", 17f)
         bNew.gravity = Gravity.CENTER
         bNew.setPadding(0, dp(18), 0, dp(18))
         foot.addView(bDel, LinearLayout.LayoutParams(0, wrap, 1f))
         foot.addView(bNew, LinearLayout.LayoutParams(0, wrap, 1f))
 
         root.addView(head)
-        root.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(sv, LinearLayout.LayoutParams(match, 0, 1f))
         root.addView(foot)
 
         fun rebuild() {
-            tNormal.alpha = if (priv) 0.45f else 1f
-            tPriv.alpha = if (priv) 1f else 0.45f
-            list.removeAllViews()
+            tNormal.alpha = if (priv) 0.4f else 1f
+            tPriv.alpha = if (priv) 1f else 0.4f
+            tNormal.setBackgroundColor(if (priv) Color.TRANSPARENT else 0xFF2A2A3A.toInt())
+            tPriv.setBackgroundColor(if (priv) 0xFF2A2A3A.toInt() else Color.TRANSPARENT)
+            grid.removeAllViews()
             for (t in tabs.filter { it.incognito == priv }) {
-                val row = LinearLayout(this)
-                row.orientation = LinearLayout.HORIZONTAL
-                row.gravity = Gravity.CENTER_VERTICAL
-                row.setPadding(dp(16), dp(10), dp(6), dp(10))
-                if (t === cur) row.setBackgroundColor(0xFF3A3A60.toInt())
+                val outer = LinearLayout(this)
+                outer.orientation = LinearLayout.VERTICAL
+                outer.setPadding(dp(4), dp(4), dp(4), dp(4))
+                val lp = GridLayout.LayoutParams()
+                lp.width = cardW
+                lp.height = wrap
+                outer.layoutParams = lp
 
-                val col = LinearLayout(this)
-                col.orientation = LinearLayout.VERTICAL
-                val title = tv(if (t.isHome) "Home" else t.title.ifBlank { t.url }, 16f)
-                title.maxLines = 1
-                title.ellipsize = TextUtils.TruncateAt.END
-                col.addView(title)
-                if (!t.isHome) {
-                    val sub = tv(hostOf(t.url), 12f, 0xFF999999.toInt())
-                    sub.maxLines = 1
-                    col.addView(sub)
-                }
+                val card = LinearLayout(this)
+                card.orientation = LinearLayout.VERTICAL
+                card.setPadding(dp(6), dp(6), dp(6), dp(6))
+                val bg = GradientDrawable()
+                bg.setColor(0xFF2B2B2B.toInt())
+                bg.cornerRadius = dp(16).toFloat()
+                if (t === cur) bg.setStroke(dp(3), 0xFF9FA8FF.toInt())
+                card.background = bg
 
-                val x = tv("✕", 20f)
-                x.setPadding(dp(16), dp(10), dp(16), dp(10))
+                val header = LinearLayout(this)
+                header.orientation = LinearLayout.HORIZONTAL
+                header.gravity = Gravity.CENTER_VERTICAL
+                val fav: View = if (t.isHome) iconView(R.drawable.ic_home, 18) else siteIcon(t.title, t.url, 20)
+                val ttl = tv(if (t.isHome) "Home" else t.title.ifBlank { t.url }, 13f)
+                ttl.maxLines = 1
+                ttl.ellipsize = TextUtils.TruncateAt.END
+                ttl.setPadding(dp(8), 0, dp(4), 0)
+                val x = iconButton(R.drawable.ic_close, 32, 32, 18)
                 x.setOnClickListener {
                     closeTab(t)
                     rebuild()
                 }
-                row.addView(col, LinearLayout.LayoutParams(0, wrap, 1f))
-                row.addView(x)
-                row.setOnClickListener {
+                header.addView(fav)
+                header.addView(ttl, LinearLayout.LayoutParams(0, wrap, 1f))
+                header.addView(x)
+
+                val thumb = ImageView(this)
+                val tbg = GradientDrawable()
+                tbg.setColor(0xFF000000.toInt())
+                tbg.cornerRadius = dp(12).toFloat()
+                thumb.background = tbg
+                thumb.clipToOutline = true
+                val bmp = t.thumb
+                if (bmp != null && !t.isHome) {
+                    thumb.scaleType = ImageView.ScaleType.CENTER_CROP
+                    thumb.setImageBitmap(bmp)
+                } else {
+                    thumb.scaleType = ImageView.ScaleType.CENTER
+                    thumb.setImageResource(if (t.isHome) R.drawable.ic_home else R.drawable.ic_desktop)
+                    thumb.setColorFilter(0xFF555555.toInt())
+                }
+                val tlp = LinearLayout.LayoutParams(match, dp(190))
+                tlp.topMargin = dp(6)
+
+                card.addView(header)
+                card.addView(thumb, tlp)
+                card.setOnClickListener {
                     selectTab(t)
                     dlg.dismiss()
                 }
-                list.addView(row)
+                outer.addView(card)
+                grid.addView(outer)
             }
         }
 
@@ -710,20 +779,20 @@ class MainActivity : AppCompatActivity() {
         val dlg = BottomSheetDialog(this)
         val grid = GridLayout(this)
         grid.columnCount = 5
-        grid.setPadding(dp(4), dp(12), dp(4), dp(12))
+        grid.setPadding(dp(4), dp(16), dp(4), dp(20))
         val w = resources.displayMetrics.widthPixels / 5 - 1
-        val on = 0xFF80CBC4.toInt()
+        val on = 0xFF9FA8FF.toInt()
 
-        fun add(icon: String, label: String, active: Boolean = false, action: () -> Unit) {
+        fun add(icon: Int, label: String, active: Boolean = false, action: () -> Unit) {
             val cell = LinearLayout(this)
             cell.orientation = LinearLayout.VERTICAL
             cell.gravity = Gravity.CENTER_HORIZONTAL
-            cell.setPadding(dp(2), dp(10), dp(2), dp(10))
-            val i = tv(icon, 24f, if (active) on else Color.WHITE)
-            i.gravity = Gravity.CENTER
+            cell.setPadding(dp(2), dp(12), dp(2), dp(12))
+            val i = iconView(icon, 26, if (active) on else Color.WHITE)
             val l = tv(label, 12f, if (active) on else 0xFFDDDDDD.toInt())
             l.gravity = Gravity.CENTER
             l.maxLines = 2
+            l.setPadding(0, dp(8), 0, 0)
             cell.addView(i)
             cell.addView(l)
             val lp = GridLayout.LayoutParams()
@@ -737,49 +806,55 @@ class MainActivity : AppCompatActivity() {
             grid.addView(cell)
         }
 
-        add("🕘", "History") { openItems("history") }
-        add("⬇", "Downloads") {
+        add(R.drawable.ic_history, "History") { openItems("history") }
+        add(R.drawable.ic_download, "Downloads") {
             try {
                 startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
             } catch (e: Exception) {
                 toast("Cannot open downloads")
             }
         }
-        add("➕", "New tab") { selectTab(newTab()) }
-        add("⛶", "Full screen") {
+        add(R.drawable.ic_add_box, "New tab") { selectTab(newTab()) }
+        add(R.drawable.ic_fullscreen, "Full screen") {
             setFullscreen(true)
             toast("Press back to exit full screen")
         }
-        add("🌙", "Dark mode", store.getBool("dark", false)) { toggleDark() }
-        add("🌐", "Translate") { translate() }
-        add("🔗", "Share URL") { shareUrl() }
-        add("🔍", "Find in page") { openFind() }
-        add("🖨", "Print / PDF") { printPage() }
-        add("📌", "Add to home") { addToDial() }
-        add("🛡", "Ad blocker", adblockOn) {
+        add(R.drawable.ic_moon, "Dark mode", store.getBool("dark", false)) { toggleDark() }
+        add(R.drawable.ic_translate, "Translate") { translate() }
+        add(R.drawable.ic_share, "Share URL") { shareUrl() }
+        add(R.drawable.ic_search, "Find in page") { openFind() }
+        add(R.drawable.ic_print, "Print / PDF") { printPage() }
+        add(R.drawable.ic_playlist_add, "Add to home") { addToDial() }
+        add(R.drawable.ic_shield, "Ad blocker", adblockOn) {
             adblockOn = !adblockOn
             store.setBool("adblock", adblockOn)
             toast(if (adblockOn) "Ad blocker on" else "Ad blocker off")
         }
-        add("🖼", "Block images", store.getBool("blockimg", false)) {
+        add(R.drawable.ic_image, "Block images", store.getBool("blockimg", false)) {
             val v = !store.getBool("blockimg", false)
             store.setBool("blockimg", v)
             for (t in tabs) applySettings(t)
             toast(if (v) "Images blocked" else "Images allowed")
         }
-        add("🖥", "Desktop", store.getBool("desktop", false)) { toggleDesktop() }
-        add("📸", "Screenshot") { screenshot() }
-        add("🔆", "Brightness") { brightnessDialog() }
-        add("🔠", "Text size") { cycleTextSize() }
-        add("📄", "Page source") { pageSource() }
-        add("🧹", "Clear data") { clearData() }
-        add("⏻", "Exit") { finishAffinity() }
+        add(R.drawable.ic_desktop, "Desktop", store.getBool("desktop", false)) { toggleDesktop() }
+        add(R.drawable.ic_screenshot, "Screenshot") { screenshot() }
+        add(R.drawable.ic_brightness, "Brightness") { brightnessDialog() }
+        add(R.drawable.ic_text_size, "Text size") { cycleTextSize() }
+        add(R.drawable.ic_code, "Page source") { pageSource() }
+        add(R.drawable.ic_delete, "Clear data") { clearData() }
+        add(R.drawable.ic_power, "Exit") { finishAffinity() }
 
         val sv = ScrollView(this)
-        sv.setBackgroundColor(0xFF222222.toInt())
+        val sheetBg = GradientDrawable()
+        sheetBg.setColor(0xFF1F1F1F.toInt())
+        val r = dp(28).toFloat()
+        sheetBg.cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+        sv.background = sheetBg
         sv.addView(grid)
         dlg.setContentView(sv)
         dlg.show()
+        dlg.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            ?.setBackgroundColor(Color.TRANSPARENT)
         dlg.behavior.state = BottomSheetBehavior.STATE_EXPANDED
     }
 

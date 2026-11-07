@@ -1,6 +1,19 @@
 package com.aura.browser
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
+import android.os.Handler
+import android.os.Looper
+import android.widget.ImageView
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -90,4 +103,94 @@ fun Context.twoFieldDialog(
         }
         .setNegativeButton("Cancel", null)
         .show()
+}
+
+fun Context.iconView(res: Int, sizeDp: Int = 24, color: Int = Color.WHITE): ImageView {
+    val v = ImageView(this)
+    v.setImageResource(res)
+    v.setColorFilter(color)
+    v.scaleType = ImageView.ScaleType.FIT_CENTER
+    v.layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+    return v
+}
+
+fun Context.iconButton(res: Int, wDp: Int, hDp: Int, iconDp: Int = 24, color: Int = Color.WHITE): ImageView {
+    val v = ImageView(this)
+    v.setImageResource(res)
+    v.setColorFilter(color)
+    v.scaleType = ImageView.ScaleType.FIT_CENTER
+    v.setPadding(dp((wDp - iconDp) / 2), dp((hDp - iconDp) / 2), dp((wDp - iconDp) / 2), dp((hDp - iconDp) / 2))
+    v.layoutParams = LinearLayout.LayoutParams(dp(wDp), dp(hDp))
+    return v
+}
+
+fun Context.siteIcon(title: String, url: String, sizeDp: Int): TextView {
+    val host = hostOf(url)
+    val fav = FaviconCache.get(this, host) ?: return letterIcon(title.ifBlank { host }, sizeDp)
+    val px = dp(sizeDp)
+    val out = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+    val c = Canvas(out)
+    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    p.color = 0xFF2A2A2A.toInt()
+    c.drawCircle(px / 2f, px / 2f, px / 2f, p)
+    val inner = (px * 0.56f).toInt()
+    val scaled = Bitmap.createScaledBitmap(fav, inner, inner, true)
+    c.drawBitmap(scaled, (px - inner) / 2f, (px - inner) / 2f, null)
+    val v = TextView(this)
+    v.background = BitmapDrawable(resources, out)
+    v.layoutParams = LinearLayout.LayoutParams(px, px)
+    return v
+}
+
+object FaviconCache {
+    private val mem = ConcurrentHashMap<String, Bitmap>()
+    private val tried = Collections.synchronizedSet(HashSet<String>())
+
+    private fun file(ctx: Context, host: String): File {
+        val d = File(ctx.filesDir, "fav")
+        d.mkdirs()
+        return File(d, host.replace("/", "_") + ".png")
+    }
+
+    fun get(ctx: Context, host: String): Bitmap? {
+        if (host.isEmpty()) return null
+        mem[host]?.let { return it }
+        val f = file(ctx, host)
+        if (f.exists()) {
+            val b = BitmapFactory.decodeFile(f.path)
+            if (b != null) {
+                mem[host] = b
+                return b
+            }
+        }
+        return null
+    }
+
+    fun save(ctx: Context, host: String, bmp: Bitmap) {
+        if (host.isEmpty()) return
+        mem[host] = bmp
+        try {
+            file(ctx, host).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun ensure(ctx: Context, host: String, onDone: () -> Unit) {
+        if (host.isEmpty() || get(ctx, host) != null || !tried.add(host)) return
+        val app = ctx.applicationContext
+        Thread {
+            try {
+                val conn = URL("https://www.google.com/s2/favicons?domain=$host&sz=64")
+                    .openConnection() as HttpURLConnection
+                conn.connectTimeout = 6000
+                conn.readTimeout = 6000
+                val b = BitmapFactory.decodeStream(conn.inputStream)
+                if (b != null) {
+                    save(app, host, b)
+                    Handler(Looper.getMainLooper()).post { onDone() }
+                }
+            } catch (_: Exception) {
+            }
+        }.start()
+    }
 }
