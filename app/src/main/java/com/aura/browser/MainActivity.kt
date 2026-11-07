@@ -60,6 +60,8 @@ import android.widget.ArrayAdapter
 import android.widget.Spinner
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -86,6 +88,8 @@ class MainActivity : AppCompatActivity() {
                 "s.textContent='html{filter:invert(1) hue-rotate(180deg)!important;background:#fff}" +
                 "img,video,picture,canvas,iframe{filter:invert(1) hue-rotate(180deg)!important}';" +
                 "document.head.appendChild(s);})();"
+
+        private val VIDEO_EXT = Regex("\\.(mp4|webm|m4v|mov|mkv|m3u8|mpd)$", RegexOption.IGNORE_CASE)
 
         private const val LIGHT_JS =
             "var e=document.getElementById('aura-dark');if(e)e.remove();"
@@ -348,6 +352,12 @@ class MainActivity : AppCompatActivity() {
         s.allowFileAccess = false
         applySettings(tab)
         wv.addJavascriptInterface(PickBridge(tab), "AuraBridge")
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(wv, AdBlock.TAP_JS, setOf("*"))
+            }
+        } catch (_: Exception) {
+        }
         wv.setOnLongClickListener { longPress(wv) }
         wv.setOnTouchListener { _, _ ->
             tab.lastTouch = System.currentTimeMillis()
@@ -414,23 +424,13 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val u = request.url
                 val host = u.host ?: return null
-                if (adblockOn && AdBlock.isYtAd(host, u.path ?: "")) {
+                if (adBlocked(tab.url, u, request.isForMainFrame)) {
                     tab.blocked++
                     pendingBlocked.incrementAndGet()
                     return emptyResponse()
                 }
-                if (adblockOn) {
-                    val pageHost = normHost(hostOf(tab.url))
-                    if (!adAllow.contains(pageHost)) {
-                        val third = pageHost.isNotEmpty() && !AdBlock.sameSite(pageHost, normHost(host))
-                        if (isAdHost(host) ||
-                            (third && !request.isForMainFrame && AdBlock.looksLikeAd(u.toString()))
-                        ) {
-                            tab.blocked++
-                            pendingBlocked.incrementAndGet()
-                            return emptyResponse()
-                        }
-                    }
+                if (!request.isForMainFrame && VIDEO_EXT.containsMatchIn(u.path ?: "")) {
+                    addVideo(tab, u.toString(), "")
                 }
                 if (Doh.endpoint.isNotEmpty() && Doh.isBlocked(host)) {
                     return if (request.isForMainFrame) {
@@ -453,6 +453,8 @@ class MainActivity : AppCompatActivity() {
                 tab.loading = true
                 tab.progress = 10
                 tab.blocked = 0
+                tab.videos.clear()
+                runOnUiThread { updateVideoBtn() }
                 injectAnti(tab)
                 if (tab === cur) updateUi()
             }
@@ -687,6 +689,7 @@ class MainActivity : AppCompatActivity() {
         cur = t
         showContent()
         updateUi()
+        updateVideoBtn()
         if (findBar.visibility == View.VISIBLE) closeFind()
     }
 
@@ -2162,7 +2165,226 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ downloads
 
-    private fun startDownload(url: String, ua: String?, cd: String?, mime: String?) {
+    private fun adBlocked(pageUrl: String, u: Uri, mainFrame: Boolean): Boolean {
+        if (!adblockOn) return false
+        val host = u.host ?: return false
+        if (AdBlock.isYtAd(host, u.path ?: "")) return true
+        val pageHost = normHost(hostOf(pageUrl))
+        if (adAllow.contains(pageHost)) return false
+        val third = pageHost.isNotEmpty() && !AdBlock.sameSite(pageHost, normHost(host))
+        return isAdHost(host) || (third && !mainFrame && AdBlock.looksLikeAd(u.toString()))
+    }
+
+    // ------------------------------------------------------------------ video download button
+
+    private var videoBtn: TextView? = null
+
+    private fun guessQuality(url: String): String {
+        val m = Regex("(2160|1440|1080|720|480|360|240|144)p?").find(url)
+        return if (m != null) m.groupValues[1] + "p" else ""
+    }
+
+    private fun addVideo(tab: BTab, url: String, label: String) {
+        if (!url.startsWith("http")) return
+        if (adBlocked(tab.url, Uri.parse(url), false)) return
+        val clean = url.substringBefore('#')
+        val old = tab.videos.firstOrNull { it.url == clean }
+        if (old != null) {
+            if (old.label.isEmpty() && label.isNotEmpty()) old.label = label
+        } else {
+            if (tab.videos.size >= 30) return
+            tab.videos.add(VideoSrc(clean, label.ifEmpty { guessQuality(clean) }))
+        }
+        runOnUiThread { if (tab === cur) updateVideoBtn() }
+    }
+
+    private fun updateVideoBtn() {
+        val t = cur
+        val show = t != null && !t.isHome && t.videos.isNotEmpty()
+        var b = videoBtn
+        if (!show) {
+            b?.visibility = View.GONE
+            return
+        }
+        if (b == null) {
+            b = tv("⬇  Download video", 13f)
+            val bg = GradientDrawable()
+            bg.cornerRadius = dp(22).toFloat()
+            bg.setColor(0xEEE91E63.toInt())
+            b.background = bg
+            b.setPadding(dp(14), dp(9), dp(14), dp(9))
+            b.elevation = dp(8).toFloat()
+            val lp = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.gravity = Gravity.BOTTOM or Gravity.END
+            lp.setMargins(0, 0, dp(12), dp(16))
+            content.addView(b, lp)
+            b.setOnClickListener { videoDialog() }
+            videoBtn = b
+        }
+        b.visibility = View.VISIBLE
+        b.bringToFront()
+    }
+
+    private fun videoDialog() {
+        val t = cur ?: return
+        val list = t.videos.toList()
+        if (list.isEmpty()) return
+        val names = list.mapIndexed { i, v ->
+            val p = (Uri.parse(v.url).path ?: "").lowercase()
+            val type = when {
+                p.endsWith(".m3u8") -> "HLS stream"
+                p.endsWith(".mpd") -> "DASH stream"
+                else -> p.substringAfterLast('.', "video").uppercase()
+            }
+            (if (v.label.isNotEmpty()) v.label else "Video " + (i + 1)) + "  •  " + type +
+                "  •  " + hostOf(v.url)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Download video")
+            .setItems(names.toTypedArray()) { _, w -> pickVideo(list[w]) }
+            .show()
+    }
+
+    private fun pickVideo(v: VideoSrc) {
+        val p = (Uri.parse(v.url).path ?: "").lowercase()
+        when {
+            p.endsWith(".m3u8") -> hlsQualities(v.url)
+            p.endsWith(".mpd") -> toast("DASH (.mpd) streams cannot be saved directly")
+            else -> startDownload(v.url, cur?.webView?.settings?.userAgentString, null, null, cur?.url)
+        }
+    }
+
+    private fun openConn(url: String): java.net.HttpURLConnection {
+        val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 30000
+        c.setRequestProperty("User-Agent", cur?.webView?.settings?.userAgentString ?: DESKTOP_UA)
+        cur?.url?.let { if (it.startsWith("http")) c.setRequestProperty("Referer", it) }
+        CookieManager.getInstance().getCookie(url)?.let { c.setRequestProperty("Cookie", it) }
+        return c
+    }
+
+    private fun httpText(url: String): String {
+        val c = openConn(url)
+        try {
+            return c.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    private fun hlsQualities(url: String) {
+        toast("Reading stream...")
+        Thread {
+            try {
+                val txt = httpText(url)
+                val lines = txt.lines()
+                val opts = mutableListOf<Pair<String, String>>()
+                if (txt.contains("#EXT-X-STREAM-INF")) {
+                    var i = 0
+                    while (i < lines.size) {
+                        val l = lines[i]
+                        if (l.startsWith("#EXT-X-STREAM-INF")) {
+                            val res = Regex("RESOLUTION=\\d+x(\\d+)").find(l)?.groupValues?.get(1)
+                            val bw = Regex("BANDWIDTH=(\\d+)").find(l)?.groupValues?.get(1)?.toLongOrNull()
+                            var j = i + 1
+                            while (j < lines.size && (lines[j].isBlank() || lines[j].startsWith("#"))) j++
+                            if (j < lines.size) {
+                                val label = (if (res != null) res + "p" else "") +
+                                    (if (bw != null) "  " + (bw / 1000) + " kbps" else "")
+                                opts.add(
+                                    label.trim().ifEmpty { "Stream" } to
+                                        java.net.URI(url).resolve(lines[j].trim()).toString()
+                                )
+                            }
+                            i = j
+                        }
+                        i++
+                    }
+                } else {
+                    opts.add("Single quality" to url)
+                }
+                opts.sortByDescending { Regex("(\\d+)p").find(it.first)?.groupValues?.get(1)?.toIntOrNull() ?: 0 }
+                runOnUiThread {
+                    if (opts.isEmpty()) {
+                        toast("No quality found")
+                    } else {
+                        AlertDialog.Builder(this)
+                            .setTitle("Choose quality")
+                            .setItems(opts.map { it.first }.toTypedArray()) { _, w -> downloadHls(opts[w].second) }
+                            .show()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { toast("Could not read stream") }
+            }
+        }.start()
+    }
+
+    private fun downloadHls(mediaUrl: String) {
+        toast("Download started (saved in Downloads)")
+        Thread {
+            var uri: Uri? = null
+            try {
+                val txt = httpText(mediaUrl)
+                if (txt.contains("#EXT-X-KEY") && !txt.contains("METHOD=NONE")) {
+                    runOnUiThread { toast("This stream is encrypted and cannot be saved") }
+                    return@Thread
+                }
+                val base = java.net.URI(mediaUrl)
+                val init = Regex("#EXT-X-MAP:.*URI=\"([^\"]+)\"").find(txt)?.groupValues?.get(1)
+                val segs = txt.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+                    .map { base.resolve(it).toString() }
+                if (segs.isEmpty()) {
+                    runOnUiThread { toast("No video data found") }
+                    return@Thread
+                }
+                val fmp4 = init != null
+                val name = "aura_video_" + System.currentTimeMillis() + (if (fmp4) ".mp4" else ".ts")
+                val cv = ContentValues()
+                cv.put(MediaStore.Downloads.DISPLAY_NAME, name)
+                cv.put(MediaStore.Downloads.MIME_TYPE, if (fmp4) "video/mp4" else "video/mp2t")
+                cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                cv.put(MediaStore.Downloads.IS_PENDING, 1)
+                uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+                val target = uri ?: throw Exception("no file")
+                contentResolver.openOutputStream(target)!!.use { out ->
+                    fun pull(u: String) {
+                        val c = openConn(u)
+                        try {
+                            c.inputStream.use { it.copyTo(out) }
+                        } finally {
+                            c.disconnect()
+                        }
+                    }
+                    if (init != null) pull(base.resolve(init).toString())
+                    var lastPct = 0
+                    for ((i, sg) in segs.withIndex()) {
+                        pull(sg)
+                        val pct = (i + 1) * 100 / segs.size
+                        if (pct >= lastPct + 25 && pct < 100) {
+                            lastPct = pct
+                            runOnUiThread { toast("Downloading... $pct%") }
+                        }
+                    }
+                }
+                val done = ContentValues()
+                done.put(MediaStore.Downloads.IS_PENDING, 0)
+                contentResolver.update(target, done, null, null)
+                runOnUiThread { toast("Saved: $name") }
+            } catch (e: Exception) {
+                try {
+                    uri?.let { contentResolver.delete(it, null, null) }
+                } catch (_: Exception) {
+                }
+                runOnUiThread { toast("Video download failed") }
+            }
+        }.start()
+    }
+
+    private fun startDownload(url: String, ua: String?, cd: String?, mime: String?, referer: String? = null) {
         if (!url.startsWith("http")) {
             toast("This link type cannot be downloaded")
             return
@@ -2171,6 +2393,7 @@ class MainActivity : AppCompatActivity() {
             val req = DownloadManager.Request(Uri.parse(url))
             if (mime != null) req.setMimeType(mime)
             if (ua != null) req.addRequestHeader("User-Agent", ua)
+            if (referer != null && referer.startsWith("http")) req.addRequestHeader("Referer", referer)
             val ck = CookieManager.getInstance().getCookie(url)
             if (ck != null) req.addRequestHeader("Cookie", ck)
             req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -2324,6 +2547,25 @@ class MainActivity : AppCompatActivity() {
 
     inner class PickBridge(private val tab: BTab) {
         @JavascriptInterface
+        fun isBlocked(url: String): Boolean = try {
+            adBlocked(tab.url, Uri.parse(url), false)
+        } catch (_: Exception) {
+            false
+        }
+
+        @JavascriptInterface
+        fun videoPlaying(json: String) {
+            try {
+                val a = JSONArray(json)
+                for (i in 0 until a.length()) {
+                    val o = a.getJSONObject(i)
+                    addVideo(tab, o.optString("u"), o.optString("l"))
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        @JavascriptInterface
         fun picked(selector: String) {
             runOnUiThread {
                 if (!tab.picking) return@runOnUiThread
@@ -2348,6 +2590,7 @@ class MainActivity : AppCompatActivity() {
         if (!url.startsWith("http")) return
         val host = normHost(hostOf(url))
         val sb = StringBuilder()
+        if (store.getBool("blockimg", false)) sb.append("img,picture{display:none!important}\n")
         if (adblockOn && cosmetic && !adAllow.contains(host)) sb.append(AdBlock.COSMETIC_CSS).append('\n')
         for (r in store.getHideRules(host)) sb.append(r).append("{display:none!important}\n")
         if (sb.isNotEmpty()) t.webView.evaluateJavascript(AdBlock.styleJs(sb.toString()), null)
@@ -2367,6 +2610,12 @@ class MainActivity : AppCompatActivity() {
         val ovl = ovlOn && !ovlAllow.contains(host)
         val cfg = "window.__auraCfg={pop:" + pop + ",ovl:" + ovl + ",elem:" + elemOn + ",ads:" + ads + "};"
         t.webView.evaluateJavascript(cfg + AdBlock.ANTI_JS, null)
+        t.webView.evaluateJavascript(AdBlock.VIDEO_JS, null)
+        if (ads) {
+            t.webView.evaluateJavascript(
+                "window.__auraAdSel=" + JSONObject.quote(AdBlock.COSMETIC_SEL) + ";" + AdBlock.COLLAPSE_JS, null
+            )
+        }
         if (ads && (host == "youtube.com" || host.endsWith(".youtube.com"))) {
             t.webView.evaluateJavascript(AdBlock.YT_JS, null)
         }

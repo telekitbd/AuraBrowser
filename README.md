@@ -32,3 +32,9 @@ All 30 menu options are wired up:
 - **Block area**, **Screen filter** (colour tint + strength), **Text size** slider, **Text zoom in** (+10%)
 - **Image editor** (rotate, flip, crop, brightness/contrast/saturation, filters, draw), **One-handed mode** (shrinks the UI to a corner, switch side)
 - **Memo** (notes with optional page link; new memo from a page pre-fills title, link and selected text)
+
+## v1.7
+- Blocked ad images / iframes / videos no longer leave an empty gap: the ad and its empty wrappers are collapsed
+- Stronger video-ad blocking (more video ad networks, VAST/pre-roll URLs, in-player ad skip, floating video ads)
+- No more blue full-screen flash when tapping a video/link (tap highlight removed in the page and in iframes)
+- **Download video** button appears when a video plays; lists all found qualities (MP4/WebM direct, HLS .m3u8 with 1080p/720p/...)

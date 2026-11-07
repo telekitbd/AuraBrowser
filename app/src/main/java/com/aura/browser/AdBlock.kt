@@ -45,7 +45,13 @@ object AdBlock {
         "smaato.net", "tapjoy.com", "fyber.com", "adcolony.com", "liftoff.io", "pangleglobal.com",
         "bytedance.com/ads", "mintegral.com", "ogury.com", "gadsme.com", "yandexadexchange.net",
         "adnium.com", "kadam.net", "dolohen.com", "adsupply.com", "traffichaus.com", "trafficfactory.biz",
-        "exoclick.net", "popmyads.com", "ad4game.com", "adk2.co", "adk2x.com", "bidbadger.com"
+        "exoclick.net", "popmyads.com", "ad4game.com", "adk2.co", "adk2x.com", "bidbadger.com",
+        "spotxchange.com", "spotx.tv", "springserve.com", "tremorhub.com", "tremorvideo.com",
+        "videoplaza.tv", "fwmrm.net", "freewheel.tv", "innovid.com", "vidazoo.com", "connatix.com",
+        "primis.tech", "anyclip.com", "aniview.com", "adpone.com", "richaudience.com", "unrulymedia.com",
+        "smartclip.net", "stickyadstv.com", "lkqd.net", "videoadex.com", "vdo.ai", "adingo.jp",
+        "video-ads.com", "vidverto.io", "playwire.com", "bannerflow.com", "adsrvmedia.net",
+        "streamrail.com", "brealtime.com", "ads.pubmatic.com", "adition.com", "adhigh.net"
     ).filter { !it.contains("/") }
 
     val SET: Set<String> = DOMAINS.toHashSet()
@@ -78,7 +84,7 @@ object AdBlock {
     private val AD_URL = Regex(
         "(^|[/._?=&-])(pagead|adserver|adservice|adsystem|adframe|adbanner|adsbygoogle|popunder|" +
             "popads|popcash|banner-?ads?|ads?[0-9]*\\.js|adv[0-9]*\\.js|ad_?unit|prebid|" +
-            "vast[0-9]*\\.xml|vpaid)([/._?=&-]|$)"
+            "vast[0-9]*\\.xml|vpaid|vmap|preroll|pre-roll|midroll|mid-roll|adtag|ad_tag|adbreak|adrequest|adslot|videoad|video-ad|vastad)([/._?=&-]|$)"
     )
     private val AD_PATH = Regex("/(ads?|adv|advert|adserver|banners?|sponsor(s|ed)?|popups?)/")
 
@@ -199,6 +205,200 @@ object AdBlock {
 })();
 """
 
+
+    /** No blue flash / focus ring when the user taps a link, video or image. Runs in every frame (also iframes). */
+    const val TAP_JS = """
+(function(){
+  function a(){
+    var p=document.head||document.documentElement;
+    if(!p||document.getElementById('aura-tap'))return false;
+    var s=document.createElement('style');
+    s.id='aura-tap';
+    s.textContent='*{-webkit-tap-highlight-color:rgba(0,0,0,0)!important}:focus,:focus-visible{outline:none!important}';
+    p.appendChild(s);
+    return true;
+  }
+  if(!a()){
+    document.addEventListener('readystatechange',a);
+    document.addEventListener('DOMContentLoaded',a);
+  }
+})();
+"""
+
+    /** Reports a playing video and its sources (with quality labels) to the app. */
+    const val VIDEO_JS = """
+(function(){
+  if(window.__auraVid){return;}
+  window.__auraVid=true;
+  function lab(e){return e.getAttribute('label')||e.getAttribute('data-res')||e.getAttribute('data-quality')||e.getAttribute('res')||e.getAttribute('size')||e.getAttribute('title')||'';}
+  function collect(v){
+    var out=[];
+    function add(u,l){if(u&&u.indexOf('http')===0){out.push({u:u,l:l||''});}}
+    add(v.currentSrc||v.src,v.videoHeight?(v.videoHeight+'p'):'');
+    var ss=v.querySelectorAll('source');
+    for(var i=0;i<ss.length;i++){add(ss[i].src,lab(ss[i]));}
+    return out;
+  }
+  function rep(e){
+    var v=e.target;
+    if(!v||v.tagName!=='VIDEO'){return;}
+    try{AuraBridge.videoPlaying(JSON.stringify(collect(v)));}catch(x){}
+  }
+  document.addEventListener('play',rep,true);
+  document.addEventListener('playing',rep,true);
+})();
+"""
+
+    /**
+     * Collapses the empty hole that a blocked ad leaves behind: hides blocked images / iframes /
+     * videos and then every wrapper that has nothing visible left in it. Also hides tiny
+     * "Advertisement" labels, outstream / floating video ads, and skips in-player video ads.
+     * Needs window.__auraCfg and the AuraBridge.isBlocked(url) bridge call.
+     */
+    const val COLLAPSE_JS = """
+(function(){
+  if(window.__auraCollapse){return;}
+  window.__auraCollapse=true;
+  var ADSIG=/(^|[-_ ])(ad|ads|advert|advertisement|banner|sponsor|sponsored|outstream|floating-video|sticky-video)(?![a-z0-9])/i;
+  var LABEL=/^(advertisements?|advertising|sponsored|ads?|promoted|বিজ্ঞাপন|প্রচারিত|विज्ञापन)\s*:?$/i;
+  var SKIP='.videoAdUiSkipButton,.ytp-ad-skip-button,.ytp-skip-ad-button,.jw-skip,.vjs-skip-button,.ima-skip-button,.videoAdUiSkipContainer button,[class*="skip-ad"],[class*="ad-skip"],[class*="adSkip"],[id*="skip-ad"],[id*="skipAd"]';
+  var ADPLAY='.vjs-ad-playing,.jw-flag-ads,.jw-state-ad,.ad-showing,.ad-interrupting,.plyr--ads,.plyr--ad-playing,.mejs-ad-playing,.fp-ad,.is-ad-playing,.ima-ad-container';
+  function on(){var c=window.__auraCfg;return !c||c.ads!==false;}
+  function hide(e){if(e.__auraX)return;e.__auraX=1;e.style.setProperty('display','none','important');}
+  function skipTag(t){return t==='SCRIPT'||t==='STYLE'||t==='LINK'||t==='META'||t==='NOSCRIPT'||t==='TEMPLATE'||t==='BR';}
+  function shown(c){
+    if(c.nodeType===3){return c.nodeValue.replace(/\s+/g,'').length>0;}
+    if(c.nodeType!==1||skipTag(c.tagName)){return false;}
+    if(c.__auraX){return false;}
+    var cs=getComputedStyle(c);
+    if(cs.display==='none'||cs.visibility==='hidden'){return false;}
+    var r=c.getBoundingClientRect();
+    if(r.width===0&&r.height===0&&!c.firstElementChild){return false;}
+    return true;
+  }
+  function collapseUp(el){
+    var p=el.parentElement,n=0;
+    while(p&&p!==document.body&&p!==document.documentElement&&n<8){
+      var kids=p.childNodes,any=false;
+      for(var i=0;i<kids.length;i++){if(shown(kids[i])){any=true;break;}}
+      if(any){break;}
+      hide(p);
+      p=p.parentElement;n++;
+    }
+  }
+  function kill(el){hide(el);collapseUp(el);}
+  function blocked(u){
+    if(!u||u.indexOf('data:')===0||u.indexOf('blob:')===0||u.indexOf('javascript:')===0||u.indexOf('about:')===0){return false;}
+    try{return !!(window.AuraBridge&&AuraBridge.isBlocked(u));}catch(e){return false;}
+  }
+  function srcOf(e){return e.currentSrc||e.src||e.getAttribute('data-src')||e.getAttribute('data-lazy-src')||'';}
+  function adAncestor(e){
+    var p=e,n=0;
+    while(p&&p!==document.body&&n<5){
+      var id=(p.id||'')+' '+(typeof p.className==='string'?p.className:'');
+      if(ADSIG.test(id)){return p;}
+      p=p.parentElement;n++;
+    }
+    return null;
+  }
+  function floating(e){
+    var p=e,n=0;
+    while(p&&p!==document.body&&n<6){
+      var pos=getComputedStyle(p).position;
+      if(pos==='fixed'||pos==='sticky'){return p;}
+      p=p.parentElement;n++;
+    }
+    return null;
+  }
+  function playerAd(){
+    var ps=document.querySelectorAll(ADPLAY);
+    for(var i=0;i<ps.length;i++){
+      var v=ps[i].tagName==='VIDEO'?ps[i]:ps[i].querySelector('video');
+      if(!v){var par=ps[i].closest('.video-js,.jwplayer,.plyr,.mejs__container,.flowplayer');if(par)v=par.querySelector('video');}
+      if(v&&isFinite(v.duration)&&v.duration>0&&v.duration<180){
+        if(!v.__auraMuted){v.__auraMuted=true;v.__auraWas=v.muted;}
+        v.muted=true;v.playbackRate=16;
+        try{v.currentTime=Math.max(0,v.duration-0.1);}catch(e){}
+      }
+    }
+    var vs=document.querySelectorAll('video');
+    for(var j=0;j<vs.length;j++){
+      var w=vs[j];
+      if(w.__auraMuted&&!w.closest(ADPLAY)){w.__auraMuted=false;w.playbackRate=1;w.muted=!!w.__auraWas;}
+    }
+    var sk=document.querySelectorAll(SKIP);
+    for(var k=0;k<sk.length;k++){
+      var r=sk[k].getBoundingClientRect();
+      if(r.width>0&&r.height>0){try{sk[k].click();}catch(e){}}
+    }
+  }
+  function scan(){
+    if(!on()||document.fullscreenElement){return;}
+    try{
+      var els=document.querySelectorAll('img,iframe,video,embed,object,source,picture');
+      for(var i=0;i<els.length;i++){
+        var e=els[i];
+        if(e.__auraX){continue;}
+        var t=e.tagName;
+        if(t==='SOURCE'){
+          var host=e.parentElement;
+          if(host&&!host.__auraX&&blocked(e.src)){kill(host);}
+          continue;
+        }
+        if(t==='PICTURE'){continue;}
+        var u=srcOf(e);
+        if(u&&e.__auraSrc!==u){
+          e.__auraSrc=u;
+          if(blocked(u)){kill(e);continue;}
+        }
+        if(t==='VIDEO'||t==='IFRAME'){
+          var a=adAncestor(e);
+          if(a){
+            var f=floating(e);
+            if(f){kill(f);continue;}
+            if(t==='IFRAME'&&e.src&&!e.__auraChk){e.__auraChk=1;}
+          }
+        }
+      }
+      var ad=document.querySelectorAll(window.__auraAdSel||'ins.adsbygoogle,.adsbygoogle,[id^="google_ads"],[id^="div-gpt-ad"],[data-ad-slot]');
+      for(var j=0;j<ad.length;j++){if(!ad[j].__auraSeen){ad[j].__auraSeen=1;hide(ad[j]);collapseUp(ad[j]);}}
+      var sm=document.querySelectorAll('span,div,p,small,label,b,i,a');
+      var cnt=0;
+      for(var m=0;m<sm.length&&cnt<400;m++){
+        var s=sm[m];
+        if(s.__auraL||s.firstElementChild){continue;}
+        s.__auraL=1;cnt++;
+        var tx=s.textContent;
+        if(tx&&tx.length<24&&LABEL.test(tx.trim())){
+          var q=s.parentElement;
+          if(q&&q.tagName!=='BODY'&&(q.children.length<=3)&&(q.innerText||'').trim().length<40){kill(q);}
+          else{kill(s);}
+        }
+      }
+      playerAd();
+    }catch(x){}
+  }
+  document.addEventListener('error',function(ev){
+    var e=ev.target;
+    if(!on()||!e||!e.tagName){return;}
+    var t=e.tagName;
+    if(t==='IMG'||t==='VIDEO'||t==='SOURCE'||t==='IFRAME'){
+      var u=srcOf(e);
+      if(blocked(u)){kill(t==='SOURCE'&&e.parentElement?e.parentElement:e);}
+    }
+  },true);
+  var tm=0;
+  function later(){if(tm)return;tm=setTimeout(function(){tm=0;scan();},250);}
+  try{
+    new MutationObserver(later).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['src','srcset','class']});
+  }catch(e){}
+  document.addEventListener('DOMContentLoaded',scan);
+  window.addEventListener('load',scan);
+  setInterval(scan,1500);
+  scan();
+})();
+"""
+
     /** YouTube video ads: skip button, fast-forward the ad, hide ad slots. */
     const val YT_JS = """
 (function(){
@@ -232,7 +432,7 @@ object AdBlock {
 })();
 """
 
-    const val COSMETIC_CSS =
+    const val COSMETIC_SEL =
         "ins.adsbygoogle,.adsbygoogle,[id^='google_ads'],[id^='div-gpt-ad'],[id^='aswift_'],[data-ad-slot]," +
             "[data-ad-client],[data-google-query-id],iframe[src*='doubleclick.net'],iframe[src*='googlesyndication']," +
             "iframe[id^='google_ads'],iframe[src*='//ads.'],iframe[src*='/adserver'],iframe[src*='popunder']," +
@@ -243,8 +443,9 @@ object AdBlock {
             "[id^='ad-'],[id^='ads-'],[id^='adv-'],[id*='popunder'],[class*='popunder'],[class*='pop-under']," +
             "[class*='sponsored-'],[class~='sponsored'],[aria-label='Advertisement'],[aria-label='advertisement']," +
             "a[href*='doubleclick.net'],a[href*='adsterra'],a[href*='popads'],a[href*='exoclick'],a[href*='propellerads']," +
-            "a[href*='juicyads'],a[href*='clickadu'],a[href*='trafficjunky']" +
-            "{display:none!important}"
+            "a[href*='juicyads'],a[href*='clickadu'],a[href*='trafficjunky']"
+
+    const val COSMETIC_CSS = COSMETIC_SEL + "{display:none!important}"
 
     fun styleJs(css: String): String =
         "(function(){var id='aura-hide';var o=document.getElementById(id);if(o)o.remove();" +

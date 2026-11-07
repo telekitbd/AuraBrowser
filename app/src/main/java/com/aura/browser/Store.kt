@@ -25,7 +25,12 @@ class BTab(val webView: WebView, val incognito: Boolean) {
 
     @Volatile
     var blocked = 0
+
+    /** Video files / streams seen on this page (for the download button). */
+    val videos = java.util.concurrent.CopyOnWriteArrayList<VideoSrc>()
 }
+
+class VideoSrc(val url: String, var label: String)
 
 class Store(ctx: Context) {
     private val sp = ctx.getSharedPreferences("aura", Context.MODE_PRIVATE)
