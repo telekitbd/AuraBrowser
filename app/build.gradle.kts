@@ -11,8 +11,8 @@ android {
         applicationId = "com.aura.browser"
         minSdk = 29
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.8"
+        versionCode = 11
+        versionName = "2.0"
     }
 
     buildTypes {

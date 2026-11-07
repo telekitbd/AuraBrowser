@@ -43,3 +43,10 @@ All 30 menu options are wired up:
 - Empty ad slots (blocked script left an empty box) are collapsed; "hollow" wrappers detected better
 - YouTube ad data is stripped before the player sees it (plus existing skip logic); Google IMA video-ad SDK blocked
 - Tap highlight / text-selection flash removed on video, image, link, button (page + iframes)
+
+## v1.9
+- Video button follows live quality changes (shows current height, newest sources first, Refresh)
+- Every source shows its full link with Download / Copy link / Share
+
+## v2.0
+- Full-screen video gestures: swipe up/down on the left = brightness, on the right = volume (with on-screen indicator)

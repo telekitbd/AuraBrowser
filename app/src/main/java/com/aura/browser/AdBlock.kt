@@ -244,6 +244,14 @@ object AdBlock {
     if(!v||v.tagName!=='VIDEO'){return;}
     try{AuraBridge.videoPlaying(JSON.stringify(collect(v)));}catch(x){}
   }
+  function res(e){
+    var v=e.target;
+    if(!v||v.tagName!=='VIDEO'||!v.videoHeight){return;}
+    try{AuraBridge.videoQuality(v.videoHeight);}catch(x){}
+    rep(e);
+  }
+  document.addEventListener('resize',res,true);
+  document.addEventListener('loadedmetadata',res,true);
   document.addEventListener('play',rep,true);
   document.addEventListener('playing',rep,true);
 })();

@@ -27,6 +27,9 @@ class BTab(val webView: WebView, val incognito: Boolean) {
     var blocked = 0
 
     /** Video files / streams seen on this page (for the download button). */
+    @Volatile
+    var quality = ""
+
     val videos = java.util.concurrent.CopyOnWriteArrayList<VideoSrc>()
 }
 

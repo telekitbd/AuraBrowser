@@ -89,7 +89,7 @@ class MainActivity : AppCompatActivity() {
                 "img,video,picture,canvas,iframe{filter:invert(1) hue-rotate(180deg)!important}';" +
                 "document.head.appendChild(s);})();"
 
-        private val VIDEO_EXT = Regex("\\.(mp4|webm|m4v|mov|mkv|m3u8|mpd)$", RegexOption.IGNORE_CASE)
+        private val VIDEO_EXT = Regex("\\.(mp4|webm|m4v|mov|mkv|m3u8|mpd|flv)(\\?|#|$)", RegexOption.IGNORE_CASE)
 
         private const val LIGHT_JS =
             "var e=document.getElementById('aura-dark');if(e)e.remove();"
@@ -435,7 +435,7 @@ class MainActivity : AppCompatActivity() {
                     pendingBlocked.incrementAndGet()
                     return emptyResponse()
                 }
-                if (!request.isForMainFrame && VIDEO_EXT.containsMatchIn(u.path ?: "")) {
+                if (!request.isForMainFrame && VIDEO_EXT.containsMatchIn(u.toString())) {
                     addVideo(tab, u.toString(), "")
                 }
                 if (Doh.endpoint.isNotEmpty() && Doh.isBlocked(host)) {
@@ -628,8 +628,16 @@ class MainActivity : AppCompatActivity() {
                 customView = view
                 customCb = callback
                 view.setBackgroundColor(Color.BLACK)
+                val wrap = GestureFrame(this@MainActivity)
+                wrap.addView(
+                    view, 0, FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
+                customWrap = wrap
+                fsBrightness = window.attributes.screenBrightness
                 (window.decorView as FrameLayout).addView(
-                    view, FrameLayout.LayoutParams(
+                    wrap, FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                     )
                 )
@@ -668,7 +676,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun hideCustom() {
         val v = customView ?: return
-        (window.decorView as FrameLayout).removeView(v)
+        val w = customWrap
+        if (w != null) {
+            w.removeAllViews()
+            (window.decorView as FrameLayout).removeView(w)
+        } else {
+            (window.decorView as FrameLayout).removeView(v)
+        }
+        customWrap = null
         customView = null
         customCb?.onCustomViewHidden()
         customCb = null
@@ -676,6 +691,7 @@ class MainActivity : AppCompatActivity() {
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         val lp = window.attributes
         lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+        lp.screenBrightness = fsBrightness
         window.attributes = lp
         if (!store.getBool("keepon", false)) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
@@ -2184,6 +2200,100 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ video download button
 
     private var videoBtn: TextView? = null
+    private var customWrap: View? = null
+    private var fsBrightness = -1f
+
+    /**
+     * Wraps the full-screen video: vertical swipe on the left side changes brightness, on the
+     * right side changes volume. Taps and other gestures still reach the video controls.
+     */
+    inner class GestureFrame(ctx: android.content.Context) : FrameLayout(ctx) {
+        private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop * 2
+        private var sx = 0f
+        private var sy = 0f
+        private var mode = 0
+        private var startVal = 0f
+        private val am = ctx.getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+        private val hud = TextView(ctx)
+        private val hideHud = Runnable { hud.visibility = View.GONE }
+
+        init {
+            hud.textSize = 18f
+            hud.setTextColor(Color.WHITE)
+            hud.setPadding(dp(18), dp(10), dp(18), dp(10))
+            val bg = GradientDrawable()
+            bg.cornerRadius = dp(20).toFloat()
+            bg.setColor(0xCC000000.toInt())
+            hud.background = bg
+            hud.visibility = View.GONE
+            addView(hud, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        }
+
+        private fun brightNow(): Float {
+            val b = this@MainActivity.window.attributes.screenBrightness
+            if (b >= 0f) return b
+            return try {
+                android.provider.Settings.System.getInt(
+                    contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS
+                ) / 255f
+            } catch (_: Exception) {
+                0.5f
+            }
+        }
+
+        override fun onInterceptTouchEvent(e: android.view.MotionEvent): Boolean {
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    sx = e.x
+                    sy = e.y
+                    mode = 0
+                }
+                android.view.MotionEvent.ACTION_MOVE -> if (mode == 0 && e.pointerCount == 1) {
+                    val dx = Math.abs(e.x - sx)
+                    val dy = Math.abs(e.y - sy)
+                    if (dy > slop && dy > dx * 1.5f) {
+                        mode = if (sx < width * 0.4f) 1 else if (sx > width * 0.6f) 2 else -1
+                        if (mode == 1) startVal = brightNow()
+                        if (mode == 2) startVal = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat()
+                    }
+                }
+            }
+            return mode > 0
+        }
+
+        override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+            if (mode <= 0) return super.onTouchEvent(e)
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val frac = (sy - e.y) / maxOf(height, 1) * 1.3f
+                    if (mode == 1) {
+                        val v = (startVal + frac).coerceIn(0.02f, 1f)
+                        val a = this@MainActivity.window.attributes
+                        a.screenBrightness = v
+                        this@MainActivity.window.attributes = a
+                        show("Brightness  " + Math.round(v * 100) + "%")
+                    } else {
+                        val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                        val v = Math.round(startVal + frac * max).coerceIn(0, max)
+                        am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, v, 0)
+                        show("Volume  $v / $max")
+                    }
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    mode = 0
+                    hud.removeCallbacks(hideHud)
+                    hud.postDelayed(hideHud, 700)
+                }
+            }
+            return true
+        }
+
+        private fun show(t: String) {
+            hud.text = t
+            hud.visibility = View.VISIBLE
+            hud.removeCallbacks(hideHud)
+        }
+    }
 
     private fun guessQuality(url: String): String {
         val m = Regex("(2160|1440|1080|720|480|360|240|144)p?").find(url)
@@ -2229,13 +2339,14 @@ class MainActivity : AppCompatActivity() {
             b.setOnClickListener { videoDialog() }
             videoBtn = b
         }
+        b.text = "\u2B07  Download video" + (if (t!!.quality.isNotEmpty()) " (" + t.quality + ")" else "")
         b.visibility = View.VISIBLE
         b.bringToFront()
     }
 
     private fun videoDialog() {
         val t = cur ?: return
-        val list = t.videos.toList()
+        val list = t.videos.toList().reversed()
         if (list.isEmpty()) return
         val names = list.mapIndexed { i, v ->
             val p = (Uri.parse(v.url).path ?: "").lowercase()
@@ -2250,15 +2361,46 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Download video")
             .setItems(names.toTypedArray()) { _, w -> pickVideo(list[w]) }
+            .setNeutralButton("Refresh") { _, _ -> videoDialog() }
+            .show()
+    }
+
+    /** Shows the full link (selectable) with Download / Copy / Share. */
+    private fun videoActions(label: String, url: String, download: () -> Unit) {
+        val box = TextView(this)
+        box.text = url
+        box.textSize = 12f
+        box.setTextIsSelectable(true)
+        box.setPadding(dp(20), dp(12), dp(20), dp(4))
+        val sv = ScrollView(this)
+        sv.addView(box)
+        AlertDialog.Builder(this)
+            .setTitle(if (label.isNotEmpty()) "Source  \u2022  $label" else "Source")
+            .setView(sv)
+            .setPositiveButton("Download") { _, _ -> download() }
+            .setNegativeButton("Copy link") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("video", url))
+                toast("Link copied")
+            }
+            .setNeutralButton("Share") { _, _ ->
+                val i = Intent(Intent.ACTION_SEND)
+                i.type = "text/plain"
+                i.putExtra(Intent.EXTRA_TEXT, url)
+                startActivity(Intent.createChooser(i, "Share link"))
+            }
             .show()
     }
 
     private fun pickVideo(v: VideoSrc) {
         val p = (Uri.parse(v.url).path ?: "").lowercase()
         when {
-            p.endsWith(".m3u8") -> hlsQualities(v.url)
-            p.endsWith(".mpd") -> toast("DASH (.mpd) streams cannot be saved directly")
-            else -> startDownload(v.url, cur?.webView?.settings?.userAgentString, null, null, cur?.url)
+            p.endsWith(".m3u8") || v.url.contains(".m3u8") ->
+                videoActions(v.label, v.url) { hlsQualities(v.url) }
+            p.endsWith(".mpd") -> videoActions(v.label, v.url) { toast("DASH (.mpd) streams cannot be saved directly") }
+            else -> videoActions(v.label, v.url) {
+                startDownload(v.url, cur?.webView?.settings?.userAgentString, null, null, cur?.url)
+            }
         }
     }
 
@@ -2319,7 +2461,9 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         AlertDialog.Builder(this)
                             .setTitle("Choose quality")
-                            .setItems(opts.map { it.first }.toTypedArray()) { _, w -> downloadHls(opts[w].second) }
+                            .setItems(opts.map { it.first }.toTypedArray()) { _, w ->
+                                videoActions(opts[w].first, opts[w].second) { downloadHls(opts[w].second) }
+                            }
                             .show()
                     }
                 }
@@ -2557,6 +2701,14 @@ class MainActivity : AppCompatActivity() {
             adBlocked(tab.url, Uri.parse(url), false)
         } catch (_: Exception) {
             false
+        }
+
+        @JavascriptInterface
+        fun videoQuality(h: Int) {
+            if (h <= 0) return
+            tab.quality = h.toString() + "p"
+            tab.videos.lastOrNull { it.label.isEmpty() }?.label = tab.quality
+            runOnUiThread { if (tab === cur) updateVideoBtn() }
         }
 
         @JavascriptInterface
