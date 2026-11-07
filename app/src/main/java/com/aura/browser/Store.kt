@@ -21,6 +21,9 @@ class BTab(val webView: WebView, val incognito: Boolean) {
     var picking = false
 
     @Volatile
+    var lastTouch = 0L
+
+    @Volatile
     var blocked = 0
 }
 
@@ -177,6 +180,15 @@ class Store(ctx: Context) {
         l.add(v)
         writeStrings(key, l)
         return true
+    }
+
+    /** Keeps the newest 150 blocked links (pop-ups, redirects, app launches) for the log screen. */
+    fun logBlocked(v: String) {
+        val l = strings("blocklog")
+        l.remove(v)
+        l.add(v)
+        while (l.size > 150) l.removeAt(0)
+        writeStrings("blocklog", l)
     }
 
     fun removeString(key: String, v: String) {

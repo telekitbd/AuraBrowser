@@ -124,13 +124,11 @@ class SettingsActivity : AppCompatActivity() {
         toggleRow("HTTPS-only mode", "Upgrade http:// links to https://", "httpsonly", false)
         toggleRow("Safe Browsing", "Warn about dangerous sites", "safebrowsing", true)
 
-        section("Ad blocking")
-        toggleRow("Ad blocker", "Block ad and tracker domains", "adblock", true)
+        section("Ad blocker")
+        toggleRow("Ad blocker", "Blocks ad, tracker and video-ad requests", "adblock", true)
+        toggleRow("Element inspection", "Hides banners, sticky bars and ad frames. Uses more memory", "elem", true)
         toggleRow("Hide ad boxes", "Remove empty ad containers on pages", "cosmetic", true)
-        toggleRow("Pop-up blocker", "Block pop-ups opened without a tap", "popup", true)
-        row("Hidden elements", "${store.strings("hide").size} elements you hid manually", null) { openList("hide") }
-        row("Blocked ad domains", "${store.strings("addom").size} domains you added", null) { openList("addomains") }
-        row("Ad blocker is off on", "${store.strings("adallow").size} sites", null) { openList("adallow") }
+        row("Ad whitelist", "${store.strings("adallow").size} sites where ads are allowed", null) { openList("adallow") }
         row("Update ad lists", "${AdLists.count} extra domains loaded - tap to refresh", null) {
             toast("Updating ad lists...")
             AdLists.update(applicationContext) { n ->
@@ -140,6 +138,25 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
         }
+        row("Blocked ad domains", "${store.strings("addom").size} domains you added", null) { openList("addomains") }
+        row("Hidden elements", "${store.strings("hide").size} elements you hid manually", null) { openList("hide") }
+
+        section("Block area")
+        toggleRow("Block area", "Long press an object, then tap it to hide it", "blockarea", false)
+
+        section("Overlay blocker")
+        toggleRow("Overlay blocker", "Removes invisible click layers and anti-adblock walls", "overlay", true)
+        row("Overlay whitelist", "${store.strings("ovlallow").size} sites where overlays are allowed", null) { openList("ovlallow") }
+
+        section("Popup blocker")
+        row("Popup blocker", POP_LEVELS[store.getInt("pop_level", 2).coerceIn(0, 2)], null) { pickPopup() }
+        row("Popup whitelist", "${store.strings("popallow").size} sites where popups are allowed", null) { openList("popallow") }
+
+        section("Block app execution")
+        row("Block app execution", APP_MODES[store.getInt("appexec", 0).coerceIn(0, 2)], null) { pickAppExec() }
+
+        section("Log")
+        row("Blocked links", "${store.strings("blocklog").size} recent pop-ups, redirects and app launches", null) { openList("blocklog") }
         row("Blocked so far", store.getBlockedTotal().toString() + " requests", null) { }
 
         section("Privacy")
@@ -158,6 +175,39 @@ class SettingsActivity : AppCompatActivity() {
 
         section("About")
         row("Aura Browser", "Version 1.1", null) { }
+    }
+
+    private val POP_LEVELS = listOf(
+        "Off - allow all popups",
+        "Normal - block ad popups",
+        "Strong - block all popups and auto-redirects"
+    )
+    private val APP_MODES = listOf(
+        "Always blocked - sites cannot open other apps",
+        "Ask each time",
+        "Allowed"
+    )
+
+    private fun pickPopup() {
+        AlertDialog.Builder(this)
+            .setTitle("Popup blocker")
+            .setSingleChoiceItems(POP_LEVELS.toTypedArray(), store.getInt("pop_level", 2)) { d, w ->
+                store.setInt("pop_level", w)
+                d.dismiss()
+                render()
+            }
+            .show()
+    }
+
+    private fun pickAppExec() {
+        AlertDialog.Builder(this)
+            .setTitle("Block app execution")
+            .setSingleChoiceItems(APP_MODES.toTypedArray(), store.getInt("appexec", 0)) { d, w ->
+                store.setInt("appexec", w)
+                d.dismiss()
+                render()
+            }
+            .show()
     }
 
     private fun pickEngine() {

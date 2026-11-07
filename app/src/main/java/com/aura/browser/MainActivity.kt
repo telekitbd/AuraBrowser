@@ -119,16 +119,19 @@ class MainActivity : AppCompatActivity() {
 
     private var fullscreen = false
     private var adblockOn = true
-    private var popupBlock = true
+    private var popupLevel = 2
+    private var ovlOn = true
+    private var elemOn = true
+    private var appExec = 0
+    private var blockArea = false
+    private var popAllow: Set<String> = emptySet()
+    private var ovlAllow: Set<String> = emptySet()
     private var cosmetic = true
     private var adDomains: Set<String> = emptySet()
     private var adAllow: Set<String> = emptySet()
     private val pendingBlocked = AtomicLong(0)
     private var lastDark = false
     private var lastDesktop = false
-    private lateinit var homeStatus: TextView
-    private lateinit var homeSearch: LinearLayout
-    private lateinit var homeMic: ImageView
     private var customView: View? = null
     private var customCb: WebChromeClient.CustomViewCallback? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
@@ -196,9 +199,6 @@ class MainActivity : AppCompatActivity() {
         tabCount = findViewById(R.id.tabCount)
         btnStar = findViewById(R.id.btnStar)
         btnRefresh = findViewById(R.id.btnRefresh)
-        homeStatus = findViewById(R.id.homeStatus)
-        homeSearch = findViewById(R.id.homeSearch)
-        homeMic = findViewById(R.id.homeMic)
 
         urlBar.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_GO ||
@@ -238,7 +238,6 @@ class MainActivity : AppCompatActivity() {
         AdLists.load(applicationContext)
         applyScreenFilter()
         renderDial()
-        setupHome()
 
         selectTab(newTab())
         val d = intent?.data
@@ -276,7 +275,6 @@ class MainActivity : AppCompatActivity() {
         }
         if (store.getBool("keepon", false)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        updateHomeStatus()
         updateUi()
     }
 
@@ -348,34 +346,62 @@ class MainActivity : AppCompatActivity() {
         applySettings(tab)
         wv.addJavascriptInterface(PickBridge(tab), "AuraBridge")
         wv.setOnLongClickListener { longPress(wv) }
+        wv.setOnTouchListener { _, _ ->
+            tab.lastTouch = System.currentTimeMillis()
+            false
+        }
 
         wv.setDownloadListener { url, ua, cd, mime, _ -> startDownload(url, ua, cd, mime) }
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val u = request.url
-                val navHost = u.host
-                if (adblockOn && navHost != null && !adAllow.contains(normHost(hostOf(tab.url))) &&
-                    (u.scheme == "http" || u.scheme == "https") && isAdHost(navHost)
-                ) {
-                    tab.blocked++
-                    pendingBlocked.incrementAndGet()
+                val scheme = u.scheme ?: return false
+                val pageHostNav = normHost(hostOf(tab.url))
+                if (scheme == "http" || scheme == "https") {
+                    val navHost = u.host ?: return false
+                    if (adblockOn && !adAllow.contains(pageHostNav) && isAdHost(navHost)) {
+                        tab.blocked++
+                        pendingBlocked.incrementAndGet()
+                        store.logBlocked(u.toString())
+                        return true
+                    }
+                    // page redirecting on its own (no tap) to another site = ad redirect
+                    if (popupLevel == 2 && request.isForMainFrame && !request.hasGesture() &&
+                        !request.isRedirect && !tab.loading && pageHostNav.isNotEmpty() &&
+                        !popAllow.contains(pageHostNav) &&
+                        !AdBlock.sameSite(pageHostNav, normHost(navHost)) &&
+                        !AdBlock.isTrustedPopup(navHost) &&
+                        System.currentTimeMillis() - tab.lastTouch > 5000
+                    ) {
+                        tab.blocked++
+                        pendingBlocked.incrementAndGet()
+                        store.logBlocked(u.toString())
+                        toast("Auto-redirect blocked")
+                        return true
+                    }
+                    return false
+                }
+                if (scheme == "about" || scheme == "file" || scheme == "data" ||
+                    scheme == "blob" || scheme == "javascript"
+                ) return false
+                val plain = scheme == "tel" || scheme == "mailto" || scheme == "sms" || scheme == "smsto"
+                if (plain) {
+                    if (request.hasGesture()) launchExternal(u)
                     return true
                 }
-                val scheme = u.scheme ?: return false
-                if (scheme == "http" || scheme == "https" || scheme == "about" ||
-                    scheme == "file" || scheme == "data" || scheme == "blob"
-                ) return false
-                try {
-                    val i = if (scheme == "intent") {
-                        val x = Intent.parseUri(u.toString(), Intent.URI_INTENT_SCHEME)
-                        x.addCategory(Intent.CATEGORY_BROWSABLE)
-                        x.component = null
-                        x.selector = null
-                        x
-                    } else Intent(Intent.ACTION_VIEW, u)
-                    startActivity(i)
-                } catch (e: Exception) {
+                when (appExec) {
+                    2 -> launchExternal(u)
+                    1 -> AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Open another app?")
+                        .setMessage(u.toString().take(120))
+                        .setPositiveButton("Open") { _, _ -> launchExternal(u) }
+                        .setNegativeButton("Block", null)
+                        .show()
+                    else -> {
+                        store.logBlocked(u.toString())
+                        toast("App launch blocked")
+                    }
                 }
                 return true
             }
@@ -385,6 +411,11 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val u = request.url
                 val host = u.host ?: return null
+                if (adblockOn && AdBlock.isYtAd(host, u.path ?: "")) {
+                    tab.blocked++
+                    pendingBlocked.incrementAndGet()
+                    return emptyResponse()
+                }
                 if (adblockOn) {
                     val pageHost = normHost(hostOf(tab.url))
                     if (!adAllow.contains(pageHost)) {
@@ -454,7 +485,8 @@ class MainActivity : AppCompatActivity() {
                 val hit = view.hitTestResult.type
                 val fromLink = hit == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
                     hit == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
-                if (!popupBlock || fromLink) {
+                val level = if (popAllow.contains(normHost(hostOf(tab.url)))) 0 else popupLevel
+                if (level == 0 || fromLink) {
                     // a real link tap (or blocker turned off): open normally
                     val nt = newTab(tab.incognito)
                     nt.isHome = false
@@ -476,7 +508,7 @@ class MainActivity : AppCompatActivity() {
                     val cross = h.isNotEmpty() && pageHost.isNotEmpty() &&
                         !AdBlock.sameSite(pageHost, normHost(h))
                     val bad = adblockOn && (isAdHost(h) || AdBlock.looksLikeAd(url))
-                    val allow = !bad && (!cross || AdBlock.isTrustedPopup(h))
+                    val allow = !bad && (AdBlock.isTrustedPopup(h) || (level == 1 && !cross))
                     runOnUiThread {
                         try {
                             probe.stopLoading()
@@ -491,6 +523,7 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             tab.blocked++
                             pendingBlocked.incrementAndGet()
+                            store.logBlocked(url)
                             toast("Pop-up blocked")
                         }
                     }
@@ -592,6 +625,20 @@ class MainActivity : AppCompatActivity() {
         content.addView(wv)
         tabs.add(tab)
         return tab
+    }
+
+    private fun launchExternal(u: Uri) {
+        try {
+            val i = if (u.scheme == "intent") {
+                val x = Intent.parseUri(u.toString(), Intent.URI_INTENT_SCHEME)
+                x.addCategory(Intent.CATEGORY_BROWSABLE)
+                x.component = null
+                x.selector = null
+                x
+            } else Intent(Intent.ACTION_VIEW, u)
+            startActivity(i)
+        } catch (_: Exception) {
+        }
     }
 
     private fun hideCustom() {
@@ -2063,7 +2110,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadPrefs() {
         adblockOn = store.getBool("adblock", true)
-        popupBlock = store.getBool("popup", true)
+        popupLevel = store.getInt("pop_level", if (store.getBool("popup", true)) 2 else 0)
+        ovlOn = store.getBool("overlay", true)
+        elemOn = store.getBool("elem", true)
+        appExec = store.getInt("appexec", 0)
+        blockArea = store.getBool("blockarea", false)
+        popAllow = store.strings("popallow").toHashSet()
+        ovlAllow = store.strings("ovlallow").toHashSet()
         cosmetic = store.getBool("cosmetic", true)
         adDomains = store.strings("addom").toHashSet()
         adAllow = store.strings("adallow").toHashSet()
@@ -2076,22 +2129,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun escHtml(t: String) =
         t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    private fun setupHome() {
-        homeSearch.setOnClickListener {
-            urlBar.requestFocus()
-            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(urlBar, InputMethodManager.SHOW_IMPLICIT)
-        }
-        homeMic.setOnClickListener { voiceSearch() }
-        updateHomeStatus()
-    }
-
-    private fun updateHomeStatus() {
-        val total = store.getBlockedTotal() + pendingBlocked.get()
-        homeStatus.text = "Ad blocker: " + (if (adblockOn) "ON" else "OFF") +
-            "   •   " + total + " blocked"
-    }
 
     private fun openDownloads() {
         startActivity(Intent(this, DownloadsActivity::class.java))
@@ -2133,6 +2170,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun longPress(wv: WebView): Boolean {
         val r = wv.hitTestResult
+        if (blockArea && r.type == WebView.HitTestResult.UNKNOWN_TYPE) {
+            startPicker()
+            return true
+        }
         val extra = r.extra ?: return false
         if (!extra.startsWith("http")) return false
         return when (r.type) {
@@ -2224,7 +2265,6 @@ class MainActivity : AppCompatActivity() {
         acts.add {
             adblockOn = !adblockOn
             store.setBool("adblock", adblockOn)
-            updateHomeStatus()
             toast(if (adblockOn) "Ad blocker on" else "Ad blocker off")
         }
         labels.add("Hide an element on this page")
@@ -2302,9 +2342,16 @@ class MainActivity : AppCompatActivity() {
             AdBlock.matches(host, adDomains)
 
     private fun injectAnti(t: BTab) {
-        if (!adblockOn || !t.url.startsWith("http")) return
-        if (adAllow.contains(normHost(hostOf(t.url)))) return
-        t.webView.evaluateJavascript(AdBlock.ANTI_JS, null)
+        if (!t.url.startsWith("http")) return
+        val host = normHost(hostOf(t.url))
+        val ads = adblockOn && !adAllow.contains(host)
+        val pop = if (popAllow.contains(host)) 0 else popupLevel
+        val ovl = ovlOn && !ovlAllow.contains(host)
+        val cfg = "window.__auraCfg={pop:" + pop + ",ovl:" + ovl + ",elem:" + elemOn + ",ads:" + ads + "};"
+        t.webView.evaluateJavascript(cfg + AdBlock.ANTI_JS, null)
+        if (ads && (host == "youtube.com" || host.endsWith(".youtube.com"))) {
+            t.webView.evaluateJavascript(AdBlock.YT_JS, null)
+        }
     }
 
     private fun updateAdLists() {

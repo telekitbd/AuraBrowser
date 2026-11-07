@@ -43,15 +43,21 @@ class ManageActivity : AppCompatActivity() {
             "addomains" -> "addom"
             "adallow" -> "adallow"
             "adultdomains" -> "adultdom"
+            "popallow" -> "popallow"
+            "ovlallow" -> "ovlallow"
+            "blocklog" -> "blocklog"
             else -> "hide"
         }
         val titleText = when (mode) {
             "addomains" -> "Blocked ad domains"
             "adallow" -> "Ad blocker is off on"
             "adultdomains" -> "Blocked sites"
+            "popallow" -> "Popup whitelist"
+            "ovlallow" -> "Overlay whitelist"
+            "blocklog" -> "Blocked links"
             else -> "Hidden elements"
         }
-        val canAdd = mode != "hide"
+        val canAdd = mode != "hide" && mode != "blocklog"
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
@@ -115,7 +121,7 @@ class ManageActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        rows = store.strings(key)
+        rows = if (mode == "blocklog") store.strings(key).reversed() else store.strings(key)
         adapter.notifyDataSetChanged()
         emptyView.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
     }
