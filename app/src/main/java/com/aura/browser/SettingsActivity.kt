@@ -159,6 +159,28 @@ class SettingsActivity : AppCompatActivity() {
         row("Blocked links", "${store.strings("blocklog").size} recent pop-ups, redirects and app launches", null) { openList("blocklog") }
         row("Blocked so far", store.getBlockedTotal().toString() + " requests", null) { }
 
+        section("VPN - open blocked sites")
+        row("VPN", VPN_MODES[store.getInt("vpn_mode", 0).coerceIn(0, 2)], null) { pickVpn() }
+        row(
+            "My own proxy",
+            store.getStr("vpn_custom", "").ifEmpty { "Not set - host:port or socks5://host:port" }, null
+        ) { customProxyDialog() }
+        row("Find a new free server", if (VpnProxy.finding) "Searching..." else "Tap to switch server", null) {
+            if (store.getInt("vpn_mode", 0) != 1) {
+                toast("Choose 'Free servers' in VPN first")
+            } else {
+                vpnWarn(store) {
+                    toast("Looking for a free server - up to 45 seconds...")
+                    VpnProxy.findFree(store) { m -> runOnUiThread { toast(m); render() } }
+                }
+            }
+        }
+        row(
+            "Status",
+            if (VpnProxy.active.isEmpty()) "Not connected" else "Connected via " + VpnProxy.active.substringAfter("://"),
+            null
+        ) { render() }
+
         section("Privacy")
         toggleRow("Block third-party cookies", "Stops cross-site tracking", "block3p", false)
         toggleRow("Block images", "Save data, load pages faster", "blockimg", false)
@@ -207,6 +229,58 @@ class SettingsActivity : AppCompatActivity() {
                 d.dismiss()
                 render()
             }
+            .show()
+    }
+
+    private val VPN_MODES = listOf(
+        "Off",
+        "Free servers (automatic)",
+        "My own proxy"
+    )
+
+    private fun pickVpn() {
+        AlertDialog.Builder(this)
+            .setTitle("VPN")
+            .setSingleChoiceItems(VPN_MODES.toTypedArray(), store.getInt("vpn_mode", 0)) { d, w ->
+                d.dismiss()
+                if (w == 1) vpnWarn(store) { setVpn(1) } else setVpn(w)
+            }
+            .show()
+    }
+
+    private fun setVpn(mode: Int) {
+        store.setInt("vpn_mode", mode)
+        if (mode == 2 && VpnProxy.normalize(store.getStr("vpn_custom", "")).isEmpty()) {
+            render()
+            customProxyDialog()
+            return
+        }
+        if (mode == 1) toast("Looking for a free server - up to 45 seconds...")
+        VpnProxy.apply(applicationContext, store) { m -> runOnUiThread { toast(m); render() } }
+        render()
+    }
+
+    private fun customProxyDialog() {
+        val e = EditText(this)
+        e.hint = "1.2.3.4:8080  or  socks5://1.2.3.4:1080"
+        e.setText(store.getStr("vpn_custom", ""))
+        e.maxLines = 1
+        AlertDialog.Builder(this)
+            .setTitle("My own proxy")
+            .setView(e)
+            .setPositiveButton("Save") { _, _ ->
+                val c = VpnProxy.normalize(e.text.toString())
+                if (c.isEmpty()) {
+                    toast("Use host:port or socks5://host:port")
+                } else {
+                    store.setStr("vpn_custom", c)
+                    if (store.getInt("vpn_mode", 0) == 2) {
+                        VpnProxy.apply(applicationContext, store) { m -> runOnUiThread { toast(m); render() } }
+                    }
+                    render()
+                }
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 

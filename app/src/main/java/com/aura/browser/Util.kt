@@ -231,3 +231,25 @@ fun cleanDomain(s: String): String {
     t = t.substringBefore('/').substringBefore('?').substringBefore(':')
     return t
 }
+
+/** One-time warning before the free VPN servers are used. */
+fun Context.vpnWarn(store: Store, onOk: () -> Unit) {
+    if (store.getBool("vpn_warned", false)) {
+        onOk()
+        return
+    }
+    AlertDialog.Builder(this)
+        .setTitle("Before you use free servers")
+        .setMessage(
+            "Free servers are run by strangers. They can see which sites you open (not what you type on " +
+                "https:// sites), they can be slow, and they stop working often.\n\n" +
+                "Do not log in to your bank or other sensitive accounts while the VPN is on. " +
+                "This VPN only covers pages opened inside Aura, not downloads or other apps."
+        )
+        .setPositiveButton("I understand") { _, _ ->
+            store.setBool("vpn_warned", true)
+            onOk()
+        }
+        .setNegativeButton("Cancel", null)
+        .show()
+}

@@ -236,6 +236,9 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptCookie(true)
         Doh.endpoint = store.getStr("dns_url", "")
         AdLists.load(applicationContext)
+        if (store.getInt("vpn_mode", 0) != 0) {
+            VpnProxy.apply(applicationContext, store) { msg -> runOnUiThread { toast(msg) } }
+        }
         applyScreenFilter()
         renderDial()
 
@@ -470,6 +473,20 @@ class MainActivity : AppCompatActivity() {
                 view: WebView, request: WebResourceRequest, error: WebResourceError
             ) {
                 if (request.isForMainFrame) {
+                    val ec = error.errorCode
+                    if (store.getInt("vpn_mode", 0) == 1 && VpnProxy.active.isNotEmpty() &&
+                        (ec == WebViewClient.ERROR_CONNECT || ec == WebViewClient.ERROR_TIMEOUT || ec == WebViewClient.ERROR_IO ||
+                            ec == WebViewClient.ERROR_PROXY_AUTHENTICATION || ec == WebViewClient.ERROR_UNKNOWN) &&
+                        VpnProxy.shouldRetry()
+                    ) {
+                        toast("Server not responding - switching...")
+                        VpnProxy.findFree(store) { msg ->
+                            runOnUiThread {
+                                toast(msg)
+                                if (VpnProxy.active.isNotEmpty()) view.reload()
+                            }
+                        }
+                    }
                     val html = "<html><body style='background:#111;color:#ddd;" +
                         "font-family:sans-serif;padding:24px'><h3>Can't open page</h3>" +
                         "<p>${error.description}</p><p style='color:#888'>${request.url}</p></body></html>"
@@ -1107,6 +1124,7 @@ class MainActivity : AppCompatActivity() {
         add(R.drawable.ic_delete, "Clear data") { clearData() }
 
         add(R.drawable.ic_refresh, "Update ad lists") { updateAdLists() }
+        add(R.drawable.ic_lock, "VPN", store.getInt("vpn_mode", 0) != 0) { vpnDialog() }
         add(R.drawable.ic_mic, "Voice search") { voiceSearch() }
         add(R.drawable.ic_copy, "Copy link") { copyLink() }
 
@@ -2352,6 +2370,69 @@ class MainActivity : AppCompatActivity() {
         if (ads && (host == "youtube.com" || host.endsWith(".youtube.com"))) {
             t.webView.evaluateJavascript(AdBlock.YT_JS, null)
         }
+    }
+
+    private fun startVpn(mode: Int) {
+        store.setInt("vpn_mode", mode)
+        if (mode == 2 && VpnProxy.normalize(store.getStr("vpn_custom", "")).isEmpty()) {
+            toast("Set your proxy in Settings first")
+            openSettings()
+            return
+        }
+        toast(if (mode == 1) "Looking for a free server - up to 45 seconds..." else "Connecting...")
+        VpnProxy.apply(applicationContext, store) { msg ->
+            runOnUiThread {
+                toast(msg)
+                val c = cur
+                if (c != null && !c.isHome && VpnProxy.active.isNotEmpty()) c.webView.reload()
+            }
+        }
+    }
+
+    private fun vpnDialog() {
+        val mode = store.getInt("vpn_mode", 0)
+        val labels = mutableListOf<String>()
+        val acts = mutableListOf<() -> Unit>()
+        if (mode != 0) {
+            labels.add("Turn VPN off")
+            acts.add {
+                store.setInt("vpn_mode", 0)
+                VpnProxy.apply(applicationContext, store) { msg ->
+                    runOnUiThread {
+                        toast(msg)
+                        val c = cur
+                        if (c != null && !c.isHome) c.webView.reload()
+                    }
+                }
+            }
+        }
+        if (mode != 1) {
+            labels.add("Turn on - free servers")
+            acts.add { vpnWarn(store) { startVpn(1) } }
+        } else {
+            labels.add("Find a new free server")
+            acts.add {
+                toast("Looking for a free server - up to 45 seconds...")
+                VpnProxy.findFree(store) { msg ->
+                    runOnUiThread {
+                        toast(msg)
+                        val c = cur
+                        if (c != null && !c.isHome && VpnProxy.active.isNotEmpty()) c.webView.reload()
+                    }
+                }
+            }
+        }
+        if (mode != 2) {
+            labels.add("Turn on - my own proxy")
+            acts.add { startVpn(2) }
+        }
+        labels.add("VPN settings")
+        acts.add { openSettings() }
+        val status = if (VpnProxy.active.isEmpty()) "not connected" else "via " + VpnProxy.active.substringAfter("://")
+        AlertDialog.Builder(this)
+            .setTitle("VPN - $status")
+            .setItems(labels.toTypedArray()) { _, w -> acts[w]() }
+            .show()
     }
 
     private fun updateAdLists() {
