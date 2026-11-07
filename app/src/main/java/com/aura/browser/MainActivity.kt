@@ -2200,7 +2200,7 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ video download button
 
     private var videoBtn: TextView? = null
-    private var customWrap: View? = null
+    private var customWrap: ViewGroup? = null
     private var fsBrightness = -1f
 
     /**

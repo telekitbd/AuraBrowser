@@ -50,3 +50,6 @@ All 30 menu options are wired up:
 
 ## v2.0
 - Full-screen video gestures: swipe up/down on the left = brightness, on the right = volume (with on-screen indicator)
+
+## v2.1
+- Fixed build error (removeAllViews on full-screen wrapper)
