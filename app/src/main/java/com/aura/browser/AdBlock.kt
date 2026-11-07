@@ -46,7 +46,7 @@ object AdBlock {
         "bytedance.com/ads", "mintegral.com", "ogury.com", "gadsme.com", "yandexadexchange.net",
         "adnium.com", "kadam.net", "dolohen.com", "adsupply.com", "traffichaus.com", "trafficfactory.biz",
         "exoclick.net", "popmyads.com", "ad4game.com", "adk2.co", "adk2x.com", "bidbadger.com",
-        "spotxchange.com", "spotx.tv", "springserve.com", "tremorhub.com", "tremorvideo.com",
+        "imasdk.googleapis.com", "spotxchange.com", "spotx.tv", "springserve.com", "tremorhub.com", "tremorvideo.com",
         "videoplaza.tv", "fwmrm.net", "freewheel.tv", "innovid.com", "vidazoo.com", "connatix.com",
         "primis.tech", "anyclip.com", "aniview.com", "adpone.com", "richaudience.com", "unrulymedia.com",
         "smartclip.net", "stickyadstv.com", "lkqd.net", "videoadex.com", "vdo.ai", "adingo.jp",
@@ -214,7 +214,7 @@ object AdBlock {
     if(!p||document.getElementById('aura-tap'))return false;
     var s=document.createElement('style');
     s.id='aura-tap';
-    s.textContent='*{-webkit-tap-highlight-color:rgba(0,0,0,0)!important}:focus,:focus-visible{outline:none!important}';
+    s.textContent='*{-webkit-tap-highlight-color:rgba(0,0,0,0)!important}:focus,:focus-visible{outline:none!important}video,img,a,button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}video::selection,img::selection,video::-webkit-media-controls-overlay-enclosure{background:transparent!important}';
     p.appendChild(s);
     return true;
   }
@@ -266,12 +266,18 @@ object AdBlock {
   function on(){var c=window.__auraCfg;return !c||c.ads!==false;}
   function hide(e){if(e.__auraX)return;e.__auraX=1;e.style.setProperty('display','none','important');}
   function skipTag(t){return t==='SCRIPT'||t==='STYLE'||t==='LINK'||t==='META'||t==='NOSCRIPT'||t==='TEMPLATE'||t==='BR';}
+  function hollow(c,cs){
+    if(c.querySelector('img,video,iframe,canvas,svg,input,button,textarea,select,picture,embed,object,audio')){return false;}
+    if((c.textContent||'').replace(/\s+/g,'').length>0){return false;}
+    return !cs||cs.backgroundImage==='none';
+  }
   function shown(c){
     if(c.nodeType===3){return c.nodeValue.replace(/\s+/g,'').length>0;}
     if(c.nodeType!==1||skipTag(c.tagName)){return false;}
     if(c.__auraX){return false;}
     var cs=getComputedStyle(c);
     if(cs.display==='none'||cs.visibility==='hidden'){return false;}
+    if(hollow(c,cs)){return false;}
     var r=c.getBoundingClientRect();
     if(r.width===0&&r.height===0&&!c.firstElementChild){return false;}
     return true;
@@ -375,6 +381,15 @@ object AdBlock {
           else{kill(s);}
         }
       }
+      var sl=document.querySelectorAll('div[id],div[class],section[id],section[class],aside[id],aside[class],span[class]');
+      for(var z=0;z<sl.length&&z<2500;z++){
+        var d=sl[z];
+        if(d.__auraX){continue;}
+        var nm=(d.id||'')+' '+(typeof d.className==='string'?d.className:'');
+        if(!ADSIG.test(nm)){continue;}
+        var dcs=getComputedStyle(d);
+        if(dcs.display!=='none'&&hollow(d,dcs)){kill(d);}
+      }
       playerAd();
     }catch(x){}
   }
@@ -404,6 +419,24 @@ object AdBlock {
 (function(){
   if(window.__auraYT){return;}
   window.__auraYT=true;
+  var DEL=['adPlacements','playerAds','adSlots','adBreakHeartbeatParams'];
+  function prune(o){
+    try{
+      if(o&&typeof o==='object'){
+        for(var i=0;i<DEL.length;i++){if(DEL[i] in o){delete o[DEL[i]];}}
+        if(o.playerResponse){prune(o.playerResponse);}
+      }
+    }catch(e){}
+    return o;
+  }
+  try{
+    var pj=JSON.parse;
+    JSON.parse=function(){return prune(pj.apply(this,arguments));};
+    var rj=Response.prototype.json;
+    Response.prototype.json=function(){return rj.apply(this,arguments).then(prune);};
+    var pv;
+    Object.defineProperty(window,'ytInitialPlayerResponse',{get:function(){return pv;},set:function(x){pv=prune(x);},configurable:true});
+  }catch(e){}
   var css='ytd-ad-slot-renderer,ytd-display-ad-renderer,ytd-promoted-sparkles-web-renderer,ytd-promoted-video-renderer,ytd-banner-promo-renderer,ytd-in-feed-ad-layout-renderer,ytd-companion-slot-renderer,ytm-promoted-sparkles-web-renderer,ytm-companion-ad-renderer,ytm-promoted-video-renderer,ad-slot-renderer,#player-ads,.ytp-ad-overlay-container,.ytp-ad-overlay-slot,.ytp-ad-image-overlay,.video-ads,.ytwFeedAdMetadataViewModelHost{display:none!important}';
   var s=document.createElement('style');
   s.textContent=css;

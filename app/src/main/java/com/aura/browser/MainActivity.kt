@@ -355,6 +355,12 @@ class MainActivity : AppCompatActivity() {
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 WebViewCompat.addDocumentStartJavaScript(wv, AdBlock.TAP_JS, setOf("*"))
+                if (store.getBool("adblock", true)) {
+                    WebViewCompat.addDocumentStartJavaScript(
+                        wv, AdBlock.YT_JS,
+                        setOf("https://www.youtube.com", "https://m.youtube.com")
+                    )
+                }
             }
         } catch (_: Exception) {
         }
@@ -2590,6 +2596,7 @@ class MainActivity : AppCompatActivity() {
         if (!url.startsWith("http")) return
         val host = normHost(hostOf(url))
         val sb = StringBuilder()
+        t.webView.evaluateJavascript(AdBlock.TAP_JS, null)
         if (store.getBool("blockimg", false)) sb.append("img,picture{display:none!important}\n")
         if (adblockOn && cosmetic && !adAllow.contains(host)) sb.append(AdBlock.COSMETIC_CSS).append('\n')
         for (r in store.getHideRules(host)) sb.append(r).append("{display:none!important}\n")

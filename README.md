@@ -38,3 +38,8 @@ All 30 menu options are wired up:
 - Stronger video-ad blocking (more video ad networks, VAST/pre-roll URLs, in-player ad skip, floating video ads)
 - No more blue full-screen flash when tapping a video/link (tap highlight removed in the page and in iframes)
 - **Download video** button appears when a video plays; lists all found qualities (MP4/WebM direct, HLS .m3u8 with 1080p/720p/...)
+
+## v1.8
+- Empty ad slots (blocked script left an empty box) are collapsed; "hollow" wrappers detected better
+- YouTube ad data is stripped before the player sees it (plus existing skip logic); Google IMA video-ad SDK blocked
+- Tap highlight / text-selection flash removed on video, image, link, button (page + iframes)
