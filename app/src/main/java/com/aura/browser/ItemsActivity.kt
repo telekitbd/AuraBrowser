@@ -14,6 +14,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.PopupMenu
@@ -103,7 +104,6 @@ class ItemsActivity : AppCompatActivity() {
 
         emptyView = tv("Nothing here yet", 16f, 0xFF888888.toInt())
         emptyView.gravity = Gravity.CENTER
-        emptyView.setPadding(0, dp(40), 0, 0)
         emptyView.visibility = View.GONE
 
         val bottom = tv("Close", 18f)
@@ -112,18 +112,25 @@ class ItemsActivity : AppCompatActivity() {
 
         root.addView(bar)
         root.addView(searchBox)
-        root.addView(emptyView)
+        val card = FrameLayout(this)
+        card.addView(listView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        card.addView(emptyView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         val listLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         listLp.setMargins(dp(10), dp(6), dp(10), dp(6))
-        root.addView(listView, listLp)
+        root.addView(card, listLp)
         root.addView(bottom, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)))
         setContentView(root)
 
         btnAdd.setOnClickListener {
             twoFieldDialog("Add bookmark", "Title", "URL", "", "https://") { t, u ->
                 if (u.isNotBlank() && u != "https://") {
-                    store.addBookmark(t, normalizeUrl(u))
-                    refresh()
+                    val nu = normalizeUrl(u)
+                    if (store.isBookmarked(nu)) {
+                        toast("Already in bookmarks")
+                    } else {
+                        store.addBookmark(t, nu)
+                        refresh()
+                    }
                 }
             }
         }
@@ -155,6 +162,7 @@ class ItemsActivity : AppCompatActivity() {
         }
         shown = l
         adapter.notifyDataSetChanged()
+        emptyView.text = if (searchBox.text.isNotEmpty()) "Nothing found" else "Nothing here yet"
         emptyView.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
     }
 
@@ -293,9 +301,12 @@ class ItemsActivity : AppCompatActivity() {
             val more = iconButton(R.drawable.ic_more_vert, 44, 44)
             more.setOnClickListener {
                 val pm = PopupMenu(this@ItemsActivity, more)
-                pm.menu.add(0, 1, 0, "Open in new tab")
-                pm.menu.add(0, 2, 0, "Copy link")
-                pm.menu.add(0, 3, 0, "Delete")
+                pm.menu.add(0, 4, 0, "Open")
+                pm.menu.add(0, 1, 1, "Open in new tab")
+                if (mode == "bookmark") pm.menu.add(0, 5, 2, "Edit")
+                pm.menu.add(0, 2, 3, "Copy link")
+                pm.menu.add(0, 6, 4, "Share")
+                pm.menu.add(0, 3, 5, "Delete")
                 pm.setOnMenuItemClickListener { m ->
                     when (m.itemId) {
                         1 -> finishWith(item.url, true)
@@ -308,6 +319,19 @@ class ItemsActivity : AppCompatActivity() {
                             if (mode == "bookmark") store.removeBookmark(item.url)
                             else store.removeHistory(item.url)
                             refresh()
+                        }
+                        4 -> finishWith(item.url, false)
+                        5 -> twoFieldDialog("Edit bookmark", "Title", "URL", item.title, item.url) { t, u ->
+                            if (u.isNotBlank()) {
+                                store.updateBookmark(item.url, t, normalizeUrl(u))
+                                refresh()
+                            }
+                        }
+                        6 -> {
+                            val i = Intent(Intent.ACTION_SEND)
+                            i.type = "text/plain"
+                            i.putExtra(Intent.EXTRA_TEXT, item.url)
+                            startActivity(Intent.createChooser(i, "Share link"))
                         }
                     }
                     true

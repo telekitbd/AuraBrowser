@@ -53,3 +53,10 @@ All 30 menu options are wired up:
 
 ## v2.1
 - Fixed build error (removeAllViews on full-screen wrapper)
+
+## v2.2
+- **Video panel**: when a video is found, a floating panel (picture-in-picture, full screen, download) appears over the page
+- **Download sheet**: lists every quality (1280x720, 1920x1080 ... with file size), tap row or play icon to download, (i) shows the full link with open / share / copy
+- HLS (.m3u8) downloads are saved to Downloads with live progress and show in the Downloads page
+- **Downloads page** redesigned: type filter (All / Page / Image / Video / Audio / Document / Others), refresh, search, Sort, Show detail info, Single line title, thumbnails for videos and images
+- **Bookmarks**: same page with/without trailing slash or #fragment is one bookmark, Edit / Open / Share in the item menu, empty message inside the card

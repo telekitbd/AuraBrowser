@@ -38,6 +38,7 @@ import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
+import android.text.format.Formatter
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -2199,7 +2200,7 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ video download button
 
-    private var videoBtn: TextView? = null
+    private var videoPanel: LinearLayout? = null
     private var customWrap: ViewGroup? = null
     private var fsBrightness = -1f
 
@@ -2314,227 +2315,299 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { if (tab === cur) updateVideoBtn() }
     }
 
+    private fun roundBtn(icon: Int, action: () -> Unit): ImageView {
+        val b = ImageView(this)
+        b.setImageResource(icon)
+        b.setColorFilter(Color.WHITE)
+        val bg = GradientDrawable()
+        bg.shape = GradientDrawable.OVAL
+        bg.setColor(0xFF5A5A5A.toInt())
+        b.background = bg
+        b.setPadding(dp(12), dp(12), dp(12), dp(12))
+        b.setOnClickListener { action() }
+        val lp = LinearLayout.LayoutParams(dp(50), dp(50))
+        lp.setMargins(dp(8), 0, dp(8), 0)
+        b.layoutParams = lp
+        return b
+    }
+
+    /** Floating panel over the page: picture-in-picture, full screen, download. */
     private fun updateVideoBtn() {
         val t = cur
         val show = t != null && !t.isHome && t.videos.isNotEmpty()
-        var b = videoBtn
+        var p = videoPanel
         if (!show) {
-            b?.visibility = View.GONE
+            p?.visibility = View.GONE
             return
         }
-        if (b == null) {
-            b = tv("⬇  Download video", 13f)
+        if (p == null) {
+            p = LinearLayout(this)
+            p.orientation = LinearLayout.HORIZONTAL
+            p.gravity = Gravity.CENTER_VERTICAL
+            p.setPadding(dp(8), dp(10), dp(8), dp(10))
             val bg = GradientDrawable()
-            bg.cornerRadius = dp(22).toFloat()
-            bg.setColor(0xEEE91E63.toInt())
-            b.background = bg
-            b.setPadding(dp(14), dp(9), dp(14), dp(9))
-            b.elevation = dp(8).toFloat()
+            bg.cornerRadius = dp(30).toFloat()
+            bg.setColor(0xF0000000.toInt())
+            bg.setStroke(dp(1), 0xFF555555.toInt())
+            p.background = bg
+            p.elevation = dp(8).toFloat()
+            p.addView(roundBtn(R.drawable.ic_pip) { videoPip() })
+            p.addView(roundBtn(R.drawable.ic_fullscreen) { videoFullscreen() })
+            p.addView(roundBtn(R.drawable.ic_download) { videoSheet() })
             val lp = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
             lp.gravity = Gravity.BOTTOM or Gravity.END
-            lp.setMargins(0, 0, dp(12), dp(16))
-            content.addView(b, lp)
-            b.setOnClickListener { videoDialog() }
-            videoBtn = b
+            lp.setMargins(0, 0, dp(2), dp(24))
+            content.addView(p, lp)
+            videoPanel = p
         }
-        b.text = "\u2B07  Download video" + (if (t!!.quality.isNotEmpty()) " (" + t.quality + ")" else "")
-        b.visibility = View.VISIBLE
-        b.bringToFront()
+        p.visibility = View.VISIBLE
+        p.bringToFront()
     }
 
-    private fun videoDialog() {
+    private fun videoFullscreen() {
         val t = cur ?: return
-        val list = t.videos.toList().reversed()
-        if (list.isEmpty()) return
-        val names = list.mapIndexed { i, v ->
-            val p = (Uri.parse(v.url).path ?: "").lowercase()
-            val type = when {
-                p.endsWith(".m3u8") -> "HLS stream"
-                p.endsWith(".mpd") -> "DASH stream"
-                else -> p.substringAfterLast('.', "video").uppercase()
-            }
-            (if (v.label.isNotEmpty()) v.label else "Video " + (i + 1)) + "  •  " + type +
-                "  •  " + hostOf(v.url)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Download video")
-            .setItems(names.toTypedArray()) { _, w -> pickVideo(list[w]) }
-            .setNeutralButton("Refresh") { _, _ -> videoDialog() }
-            .show()
-    }
-
-    /** Shows the full link (selectable) with Download / Copy / Share. */
-    private fun videoActions(label: String, url: String, download: () -> Unit) {
-        val box = TextView(this)
-        box.text = url
-        box.textSize = 12f
-        box.setTextIsSelectable(true)
-        box.setPadding(dp(20), dp(12), dp(20), dp(4))
-        val sv = ScrollView(this)
-        sv.addView(box)
-        AlertDialog.Builder(this)
-            .setTitle(if (label.isNotEmpty()) "Source  \u2022  $label" else "Source")
-            .setView(sv)
-            .setPositiveButton("Download") { _, _ -> download() }
-            .setNegativeButton("Copy link") { _, _ ->
-                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("video", url))
-                toast("Link copied")
-            }
-            .setNeutralButton("Share") { _, _ ->
-                val i = Intent(Intent.ACTION_SEND)
-                i.type = "text/plain"
-                i.putExtra(Intent.EXTRA_TEXT, url)
-                startActivity(Intent.createChooser(i, "Share link"))
-            }
-            .show()
-    }
-
-    private fun pickVideo(v: VideoSrc) {
-        val p = (Uri.parse(v.url).path ?: "").lowercase()
-        when {
-            p.endsWith(".m3u8") || v.url.contains(".m3u8") ->
-                videoActions(v.label, v.url) { hlsQualities(v.url) }
-            p.endsWith(".mpd") -> videoActions(v.label, v.url) { toast("DASH (.mpd) streams cannot be saved directly") }
-            else -> videoActions(v.label, v.url) {
-                startDownload(v.url, cur?.webView?.settings?.userAgentString, null, null, cur?.url)
-            }
+        val js = "(function(){var vs=document.querySelectorAll('video'),v=null;" +
+            "for(var i=0;i<vs.length;i++){if(!vs[i].paused){v=vs[i];break;}}" +
+            "if(!v)v=vs[0];" +
+            "if(!v){var f=document.querySelector('iframe');if(f&&f.requestFullscreen){f.requestFullscreen();return 'ok';}return 'no';}" +
+            "var r=v.requestFullscreen||v.webkitRequestFullscreen;if(r){r.call(v);return 'ok';}return 'no';})()"
+        t.webView.evaluateJavascript(js) { r ->
+            if (r != null && r.contains("no")) toast("Use the player's own full screen button")
         }
     }
 
-    private fun openConn(url: String): java.net.HttpURLConnection {
-        val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-        c.connectTimeout = 15000
-        c.readTimeout = 30000
-        c.setRequestProperty("User-Agent", cur?.webView?.settings?.userAgentString ?: DESKTOP_UA)
-        cur?.url?.let { if (it.startsWith("http")) c.setRequestProperty("Referer", it) }
-        CookieManager.getInstance().getCookie(url)?.let { c.setRequestProperty("Cookie", it) }
-        return c
+    private fun videoPip() {
+        videoFullscreen()
+        content.postDelayed({
+            try {
+                enterPictureInPictureMode(
+                    android.app.PictureInPictureParams.Builder()
+                        .setAspectRatio(android.util.Rational(16, 9)).build()
+                )
+            } catch (e: Exception) {
+                toast("Picture-in-picture is not available")
+            }
+        }, 500)
     }
 
-    private fun httpText(url: String): String {
-        val c = openConn(url)
+    private fun fileBase(title: String, label: String): String {
+        var n = title.replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), " ").replace(Regex("\\s+"), " ").trim()
+        if (n.length > 70) n = n.substring(0, 70).trim()
+        if (n.isEmpty()) n = "video"
+        val l = label.replace(Regex("[\\\\/:*?\"<>|]"), "").trim()
+        return if (l.isEmpty()) n else "$n - $l"
+    }
+
+    private fun sheetBox(): Pair<com.google.android.material.bottomsheet.BottomSheetDialog, LinearLayout> {
+        val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        val bg = GradientDrawable()
+        val r = dp(28).toFloat()
+        bg.cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+        bg.setColor(0xFF202020.toInt())
+        box.background = bg
+        return Pair(sheet, box)
+    }
+
+    private fun showSheet(sheet: com.google.android.material.bottomsheet.BottomSheetDialog, box: View) {
+        sheet.setContentView(box)
         try {
-            return c.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            c.disconnect()
+            sheet.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+                ?.setBackgroundColor(Color.TRANSPARENT)
+            sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+        } catch (_: Exception) {
+        }
+        sheet.show()
+    }
+
+    /** Bottom sheet with every quality found: 1  1280x720  MP4  (i)  >  */
+    private fun videoSheet() {
+        val t = cur ?: return
+        val srcs = t.videos.toList().reversed()
+        if (srcs.isEmpty()) return
+        val ua = t.webView.settings.userAgentString ?: DESKTOP_UA
+        val ref = t.url
+        val title = t.title
+        val (sheet, box) = sheetBox()
+        val list = LinearLayout(this)
+        list.orientation = LinearLayout.VERTICAL
+        list.setPadding(0, dp(8), 0, dp(12))
+        val loading = tv("Looking for qualities...", 14f, 0xFF999999.toInt())
+        loading.setPadding(dp(24), dp(18), dp(24), dp(18))
+        list.addView(loading)
+        val sv = ScrollView(this)
+        sv.addView(list)
+        box.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        var count = 0
+
+        fun addRow(label: String, type: String, url: String, hls: Boolean): TextView {
+            if (loading.parent != null) list.removeView(loading)
+            count++
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setPadding(dp(20), dp(6), dp(8), dp(6))
+            val num = tv(count.toString(), 18f)
+            num.gravity = Gravity.CENTER
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            val lab = tv(label.ifEmpty { "Video" }, 19f)
+            val sub = tv("", 12f, 0xFF999999.toInt())
+            sub.visibility = View.GONE
+            col.addView(lab)
+            col.addView(sub)
+            val typ = tv(type, 16f, 0xFFCCCCCC.toInt())
+            typ.setPadding(0, 0, dp(8), 0)
+            val info = iconButton(R.drawable.ic_info, 44, 52)
+            val play = iconButton(R.drawable.ic_play, 44, 52)
+            row.addView(num, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT))
+            row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(16) })
+            row.addView(typ)
+            row.addView(info)
+            row.addView(play)
+            val go = {
+                sheet.dismiss()
+                startVideoDownload(hls, url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref)
+            }
+            row.setOnClickListener { go() }
+            play.setOnClickListener { go() }
+            info.setOnClickListener { videoInfo(url) }
+            list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+            val line = View(this)
+            line.setBackgroundColor(0xFF333333.toInt())
+            list.addView(line, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+                leftMargin = dp(16)
+                rightMargin = dp(16)
+            })
+            sub.tag = lab
+            return sub
+        }
+
+        for (v in srcs) {
+            val low = v.url.lowercase()
+            val path = (Uri.parse(v.url).path ?: "").lowercase()
+            if (path.endsWith(".m3u8") || low.contains(".m3u8")) {
+                Thread {
+                    try {
+                        val vs = VideoDl.variants(v.url, ua, ref)
+                        runOnUiThread {
+                            for (x in vs) addRow(x.label, "HLS", x.url, true)
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread { addRow(v.label.ifEmpty { "Stream" }, "HLS", v.url, true) }
+                    }
+                }.start()
+            } else if (path.endsWith(".mpd") || low.contains(".mpd")) {
+                continue
+            } else {
+                val ext = path.substringAfterLast('.', "mp4").uppercase().take(4)
+                val sub = addRow(v.label, ext, v.url, false)
+                Thread {
+                    val p = VideoDl.probe(v.url, ua, ref)
+                    runOnUiThread {
+                        val lab = sub.tag as? TextView
+                        if (p.w > 0 && p.h > 0 && lab != null) lab.text = p.w.toString() + "x" + p.h
+                        if (p.size > 0) {
+                            sub.text = Formatter.formatShortFileSize(this, p.size)
+                            sub.visibility = View.VISIBLE
+                        }
+                    }
+                }.start()
+            }
+        }
+        if (count == 0 && srcs.none { it.url.lowercase().contains(".m3u8") }) {
+            loading.text = "No downloadable video found on this page"
+        }
+        showSheet(sheet, box)
+    }
+
+    /** Source details: full link with open / share / copy. */
+    private fun videoInfo(url: String) {
+        val (sheet, box) = sheetBox()
+        val top = LinearLayout(this)
+        top.orientation = LinearLayout.HORIZONTAL
+        top.gravity = Gravity.CENTER_VERTICAL
+        top.setPadding(dp(14), dp(8), dp(10), dp(8))
+        val help = iconButton(R.drawable.ic_help, 48, 48)
+        help.setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("Video source")
+                .setMessage("This is the direct address of the video.\n\n• Arrows: open in another player\n• Share: send the link\n• Link: copy it")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+        val open = iconButton(R.drawable.ic_open_with, 48, 48)
+        open.setOnClickListener {
+            try {
+                val i = Intent(Intent.ACTION_VIEW)
+                i.setDataAndType(Uri.parse(url), "video/*")
+                startActivity(Intent.createChooser(i, "Open with"))
+            } catch (e: Exception) {
+                toast("No player found")
+            }
+        }
+        val share = iconButton(R.drawable.ic_share, 48, 48)
+        share.setOnClickListener {
+            val i = Intent(Intent.ACTION_SEND)
+            i.type = "text/plain"
+            i.putExtra(Intent.EXTRA_TEXT, url)
+            startActivity(Intent.createChooser(i, "Share link"))
+        }
+        val copy = iconButton(R.drawable.ic_link, 48, 48)
+        copy.setOnClickListener {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("video", url))
+            toast("Link copied")
+        }
+        val gap = View(this)
+        top.addView(help)
+        top.addView(gap, LinearLayout.LayoutParams(0, 1, 1f))
+        top.addView(open)
+        top.addView(share)
+        top.addView(copy)
+        val line = View(this)
+        line.setBackgroundColor(0xFF333333.toInt())
+        val link = tv(url, 18f)
+        link.setTextIsSelectable(true)
+        link.setPadding(dp(20), dp(24), dp(20), dp(24))
+        val line2 = View(this)
+        line2.setBackgroundColor(0xFF333333.toInt())
+        val ok = tv("OK", 18f)
+        ok.gravity = Gravity.CENTER
+        ok.setOnClickListener { sheet.dismiss() }
+        box.addView(top)
+        box.addView(line, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        })
+        val sv = ScrollView(this)
+        sv.addView(link)
+        box.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        box.addView(line2, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        })
+        box.addView(ok, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+        showSheet(sheet, box)
+    }
+
+    private fun startVideoDownload(hls: Boolean, url: String, label: String, title: String, ua: String, ref: String) {
+        val base = fileBase(title, label)
+        if (hls) {
+            VideoDl.downloadHls(applicationContext, store, url, base, ua, ref) { m ->
+                runOnUiThread { toast(m) }
+            }
+        } else {
+            val path = (Uri.parse(url).path ?: "").lowercase()
+            val ext = listOf("mp4", "webm", "m4v", "mov", "mkv", "flv").firstOrNull { path.endsWith(".$it") } ?: "mp4"
+            startDownload(url, ua, null, null, ref, "$base.$ext")
         }
     }
 
-    private fun hlsQualities(url: String) {
-        toast("Reading stream...")
-        Thread {
-            try {
-                val txt = httpText(url)
-                val lines = txt.lines()
-                val opts = mutableListOf<Pair<String, String>>()
-                if (txt.contains("#EXT-X-STREAM-INF")) {
-                    var i = 0
-                    while (i < lines.size) {
-                        val l = lines[i]
-                        if (l.startsWith("#EXT-X-STREAM-INF")) {
-                            val res = Regex("RESOLUTION=\\d+x(\\d+)").find(l)?.groupValues?.get(1)
-                            val bw = Regex("BANDWIDTH=(\\d+)").find(l)?.groupValues?.get(1)?.toLongOrNull()
-                            var j = i + 1
-                            while (j < lines.size && (lines[j].isBlank() || lines[j].startsWith("#"))) j++
-                            if (j < lines.size) {
-                                val label = (if (res != null) res + "p" else "") +
-                                    (if (bw != null) "  " + (bw / 1000) + " kbps" else "")
-                                opts.add(
-                                    label.trim().ifEmpty { "Stream" } to
-                                        java.net.URI(url).resolve(lines[j].trim()).toString()
-                                )
-                            }
-                            i = j
-                        }
-                        i++
-                    }
-                } else {
-                    opts.add("Single quality" to url)
-                }
-                opts.sortByDescending { Regex("(\\d+)p").find(it.first)?.groupValues?.get(1)?.toIntOrNull() ?: 0 }
-                runOnUiThread {
-                    if (opts.isEmpty()) {
-                        toast("No quality found")
-                    } else {
-                        AlertDialog.Builder(this)
-                            .setTitle("Choose quality")
-                            .setItems(opts.map { it.first }.toTypedArray()) { _, w ->
-                                videoActions(opts[w].first, opts[w].second) { downloadHls(opts[w].second) }
-                            }
-                            .show()
-                    }
-                }
-            } catch (e: Exception) {
-                runOnUiThread { toast("Could not read stream") }
-            }
-        }.start()
-    }
-
-    private fun downloadHls(mediaUrl: String) {
-        toast("Download started (saved in Downloads)")
-        Thread {
-            var uri: Uri? = null
-            try {
-                val txt = httpText(mediaUrl)
-                if (txt.contains("#EXT-X-KEY") && !txt.contains("METHOD=NONE")) {
-                    runOnUiThread { toast("This stream is encrypted and cannot be saved") }
-                    return@Thread
-                }
-                val base = java.net.URI(mediaUrl)
-                val init = Regex("#EXT-X-MAP:.*URI=\"([^\"]+)\"").find(txt)?.groupValues?.get(1)
-                val segs = txt.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
-                    .map { base.resolve(it).toString() }
-                if (segs.isEmpty()) {
-                    runOnUiThread { toast("No video data found") }
-                    return@Thread
-                }
-                val fmp4 = init != null
-                val name = "aura_video_" + System.currentTimeMillis() + (if (fmp4) ".mp4" else ".ts")
-                val cv = ContentValues()
-                cv.put(MediaStore.Downloads.DISPLAY_NAME, name)
-                cv.put(MediaStore.Downloads.MIME_TYPE, if (fmp4) "video/mp4" else "video/mp2t")
-                cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                cv.put(MediaStore.Downloads.IS_PENDING, 1)
-                uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
-                val target = uri ?: throw Exception("no file")
-                contentResolver.openOutputStream(target)!!.use { out ->
-                    fun pull(u: String) {
-                        val c = openConn(u)
-                        try {
-                            c.inputStream.use { it.copyTo(out) }
-                        } finally {
-                            c.disconnect()
-                        }
-                    }
-                    if (init != null) pull(base.resolve(init).toString())
-                    var lastPct = 0
-                    for ((i, sg) in segs.withIndex()) {
-                        pull(sg)
-                        val pct = (i + 1) * 100 / segs.size
-                        if (pct >= lastPct + 25 && pct < 100) {
-                            lastPct = pct
-                            runOnUiThread { toast("Downloading... $pct%") }
-                        }
-                    }
-                }
-                val done = ContentValues()
-                done.put(MediaStore.Downloads.IS_PENDING, 0)
-                contentResolver.update(target, done, null, null)
-                runOnUiThread { toast("Saved: $name") }
-            } catch (e: Exception) {
-                try {
-                    uri?.let { contentResolver.delete(it, null, null) }
-                } catch (_: Exception) {
-                }
-                runOnUiThread { toast("Video download failed") }
-            }
-        }.start()
-    }
-
-    private fun startDownload(url: String, ua: String?, cd: String?, mime: String?, referer: String? = null) {
+    private fun startDownload(url: String, ua: String?, cd: String?, mime: String?, referer: String? = null, fileName: String? = null) {
         if (!url.startsWith("http")) {
             toast("This link type cannot be downloaded")
             return
@@ -2547,7 +2620,7 @@ class MainActivity : AppCompatActivity() {
             val ck = CookieManager.getInstance().getCookie(url)
             if (ck != null) req.addRequestHeader("Cookie", ck)
             req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            val name = URLUtil.guessFileName(url, cd, mime)
+            val name = fileName ?: URLUtil.guessFileName(url, cd, mime)
             req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
             val id = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
             store.addDownload(id, name, url)

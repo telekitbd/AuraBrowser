@@ -7,7 +7,7 @@ import org.json.JSONObject
 
 data class Item(val title: String, val url: String, val time: Long)
 
-data class DlItem(val id: Long, val name: String, val url: String, val time: Long)
+data class DlItem(val id: Long, val name: String, val url: String, val time: Long, val local: String = "")
 
 data class Memo(val id: Long, val title: String, val body: String, val url: String, val time: Long)
 
@@ -62,18 +62,36 @@ class Store(ctx: Context) {
     // ---- bookmarks ----
     fun getBookmarks(): MutableList<Item> = readList("bookmarks")
 
-    fun isBookmarked(url: String): Boolean = getBookmarks().any { it.url == url }
+    /** Same page with / without a trailing slash or #fragment counts as the same bookmark. */
+    private fun bmKey(u: String): String = u.substringBefore('#').trimEnd('/').lowercase()
+
+    fun isBookmarked(url: String): Boolean {
+        val k = bmKey(url)
+        return getBookmarks().any { bmKey(it.url) == k }
+    }
 
     fun addBookmark(title: String, url: String) {
         val l = getBookmarks()
-        if (l.any { it.url == url }) return
-        l.add(0, Item(title.ifBlank { url }, url, System.currentTimeMillis()))
+        val k = bmKey(url)
+        if (l.any { bmKey(it.url) == k }) return
+        val t = title.trim()
+        l.add(0, Item(if (t.isEmpty() || t == url) hostOf(url) else t, url, System.currentTimeMillis()))
         writeList("bookmarks", l)
     }
 
     fun removeBookmark(url: String) {
         val l = getBookmarks()
-        l.removeAll { it.url == url }
+        val k = bmKey(url)
+        l.removeAll { bmKey(it.url) == k }
+        writeList("bookmarks", l)
+    }
+
+    /** Edit a bookmark in place (keeps its date and position). */
+    fun updateBookmark(oldUrl: String, title: String, url: String) {
+        val l = getBookmarks()
+        val i = l.indexOfFirst { it.url == oldUrl }
+        if (i < 0) return
+        l[i] = Item(title.ifBlank { hostOf(url) }, url, l[i].time)
         writeList("bookmarks", l)
     }
 
@@ -132,7 +150,7 @@ class Store(ctx: Context) {
             val arr = JSONArray(sp.getString("downloads", "[]"))
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                out.add(DlItem(o.optLong("i"), o.optString("n"), o.optString("u"), o.optLong("d")))
+                out.add(DlItem(o.optLong("i"), o.optString("n"), o.optString("u"), o.optLong("d"), o.optString("l")))
             }
         } catch (_: Exception) {
         }
@@ -142,15 +160,15 @@ class Store(ctx: Context) {
     private fun writeDownloads(list: List<DlItem>) {
         val arr = JSONArray()
         for (x in list) {
-            arr.put(JSONObject().put("i", x.id).put("n", x.name).put("u", x.url).put("d", x.time))
+            arr.put(JSONObject().put("i", x.id).put("n", x.name).put("u", x.url).put("d", x.time).put("l", x.local))
         }
         sp.edit().putString("downloads", arr.toString()).apply()
     }
 
-    fun addDownload(id: Long, name: String, url: String) {
+    fun addDownload(id: Long, name: String, url: String, local: String = "") {
         val l = getDownloads()
         l.removeAll { it.id == id }
-        l.add(0, DlItem(id, name, url, System.currentTimeMillis()))
+        l.add(0, DlItem(id, name, url, System.currentTimeMillis(), local))
         while (l.size > 300) l.removeAt(l.size - 1)
         writeDownloads(l)
     }
