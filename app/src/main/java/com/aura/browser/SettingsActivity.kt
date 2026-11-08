@@ -122,7 +122,7 @@ class SettingsActivity : AppCompatActivity() {
 
         section("Safety")
         toggleRow("HTTPS-only mode", "Upgrade http:// links to https://", "httpsonly", false)
-        toggleRow("Safe Browsing", "Warn about dangerous sites", "safebrowsing", true)
+        row("Safe Browsing", "Always off", null) { toast("Safe Browsing is always off") }
 
         section("Ad blocker")
         toggleRow("Ad blocker", "Blocks ad, tracker and video-ad requests", "adblock", true)

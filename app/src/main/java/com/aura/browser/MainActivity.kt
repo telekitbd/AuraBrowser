@@ -450,6 +450,13 @@ class MainActivity : AppCompatActivity() {
                 return null
             }
 
+            override fun onSafeBrowsingHit(
+                view: WebView, request: WebResourceRequest, threatType: Int,
+                callback: android.webkit.SafeBrowsingResponse
+            ) {
+                callback.proceed(false)
+            }
+
             override fun onPageCommitVisible(view: WebView, url: String?) {
                 applyHide(tab)
                 injectAnti(tab)
@@ -703,7 +710,7 @@ class MainActivity : AppCompatActivity() {
         st.blockNetworkImage = store.getBool("blockimg", false)
         st.textZoom = store.getInt("zoom", 100)
         st.javaScriptEnabled = store.getBool("js", true)
-        st.setSafeBrowsingEnabled(store.getBool("safebrowsing", true))
+        st.setSafeBrowsingEnabled(false)
         CookieManager.getInstance().setAcceptThirdPartyCookies(t.webView, !store.getBool("block3p", false))
     }
 

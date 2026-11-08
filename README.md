@@ -60,3 +60,6 @@ All 30 menu options are wired up:
 - HLS (.m3u8) downloads are saved to Downloads with live progress and show in the Downloads page
 - **Downloads page** redesigned: type filter (All / Page / Image / Video / Audio / Document / Others), refresh, search, Sort, Show detail info, Single line title, thumbnails for videos and images
 - **Bookmarks**: same page with/without trailing slash or #fragment is one bookmark, Edit / Open / Share in the item menu, empty message inside the card
+
+## v2.3
+- Safe Browsing is always off (app-level, per WebView, and warning pages are skipped); no restart needed
