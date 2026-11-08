@@ -7,6 +7,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
@@ -40,6 +41,7 @@ import android.widget.FrameLayout
 import android.widget.GridLayout
 import android.text.format.Formatter
 import android.widget.ImageView
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -2208,6 +2210,12 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ video download button
 
     private var videoPanel: LinearLayout? = null
+    private var videoFab: ImageView? = null
+    private val hidePanel = Runnable { videoPanel?.visibility = View.GONE }
+
+    private class VRow(val label: String, val type: String, val url: String, val hls: Boolean)
+
+    private class VGroup(val rows: MutableList<VRow>, val keys: MutableSet<String>, var seen: Long)
     private var customWrap: ViewGroup? = null
     private var fsBrightness = -1f
 
@@ -2314,6 +2322,7 @@ class MainActivity : AppCompatActivity() {
         val clean = url.substringBefore('#')
         val old = tab.videos.firstOrNull { it.url == clean }
         if (old != null) {
+            old.time = System.currentTimeMillis()
             if (old.label.isEmpty() && label.isNotEmpty()) old.label = label
         } else {
             if (tab.videos.size >= 30) return
@@ -2338,17 +2347,71 @@ class MainActivity : AppCompatActivity() {
         return b
     }
 
-    /** Floating panel over the page: picture-in-picture, full screen, download. */
+    /**
+     * One small floating button; tapping it opens the panel with three actions
+     * (picture-in-picture, full screen, download).
+     */
     private fun updateVideoBtn() {
         val t = cur
         val show = t != null && !t.isHome && t.videos.isNotEmpty()
-        var p = videoPanel
+        var fab = videoFab
         if (!show) {
-            p?.visibility = View.GONE
+            fab?.visibility = View.GONE
+            videoPanel?.visibility = View.GONE
             return
         }
-        if (p == null) {
-            p = LinearLayout(this)
+        if (fab == null) {
+            fab = ImageView(this)
+            fab.setImageResource(R.drawable.ic_download)
+            fab.setColorFilter(Color.WHITE)
+            val fbg = GradientDrawable()
+            fbg.shape = GradientDrawable.OVAL
+            fbg.setColor(0xFF7C6FE0.toInt())
+            fab.background = fbg
+            fab.setPadding(dp(12), dp(12), dp(12), dp(12))
+            fab.elevation = dp(8).toFloat()
+            val flp = FrameLayout.LayoutParams(dp(48), dp(48))
+            flp.gravity = Gravity.TOP or Gravity.END
+            flp.setMargins(0, dp(150), dp(10), 0)
+            content.addView(fab, flp)
+            // tap = open / close the panel, drag = move the button anywhere
+            val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+            var downX = 0f
+            var downY = 0f
+            var startTx = 0f
+            var startTy = 0f
+            var moved = false
+            fab.setOnTouchListener { v, e ->
+                when (e.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        downX = e.rawX
+                        downY = e.rawY
+                        startTx = v.translationX
+                        startTy = v.translationY
+                        moved = false
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        val mx = e.rawX - downX
+                        val my = e.rawY - downY
+                        if (!moved && (Math.abs(mx) > slop || Math.abs(my) > slop)) {
+                            moved = true
+                            videoPanel?.visibility = View.GONE
+                        }
+                        if (moved) {
+                            val minX = -(content.width - dp(48) - dp(10)).toFloat()
+                            val minY = -dp(150).toFloat()
+                            val maxY = (content.height - dp(150) - dp(48)).toFloat()
+                            v.translationX = (startTx + mx).coerceIn(minOf(minX, 0f), 0f)
+                            v.translationY = (startTy + my).coerceIn(minY, maxOf(minY, maxY))
+                        }
+                    }
+                    android.view.MotionEvent.ACTION_UP -> if (!moved) toggleVideoPanel()
+                }
+                true
+            }
+            videoFab = fab
+
+            val p = LinearLayout(this)
             p.orientation = LinearLayout.HORIZONTAL
             p.gravity = Gravity.CENTER_VERTICAL
             p.setPadding(dp(8), dp(10), dp(8), dp(10))
@@ -2358,19 +2421,38 @@ class MainActivity : AppCompatActivity() {
             bg.setStroke(dp(1), 0xFF555555.toInt())
             p.background = bg
             p.elevation = dp(8).toFloat()
-            p.addView(roundBtn(R.drawable.ic_pip) { videoPip() })
-            p.addView(roundBtn(R.drawable.ic_fullscreen) { videoFullscreen() })
-            p.addView(roundBtn(R.drawable.ic_download) { videoSheet() })
+            p.addView(roundBtn(R.drawable.ic_pip) { p.visibility = View.GONE; videoPip() })
+            p.addView(roundBtn(R.drawable.ic_fullscreen) { p.visibility = View.GONE; videoFullscreen() })
+            p.addView(roundBtn(R.drawable.ic_download) { p.visibility = View.GONE; videoSheet() })
+            p.visibility = View.GONE
             val lp = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            lp.gravity = Gravity.BOTTOM or Gravity.END
-            lp.setMargins(0, 0, dp(2), dp(24))
+            lp.gravity = Gravity.TOP or Gravity.END
+            lp.setMargins(0, dp(150) + dp(56), dp(2), 0)
             content.addView(p, lp)
             videoPanel = p
         }
+        fab.visibility = View.VISIBLE
+        fab.bringToFront()
+    }
+
+    /** Opens the three-button panel right under the media button (above it when the button is low). */
+    private fun toggleVideoPanel() {
+        val p = videoPanel ?: return
+        val fab = videoFab ?: return
+        if (p.visibility == View.VISIBLE) {
+            p.visibility = View.GONE
+            return
+        }
+        val ph = if (p.height > 0) p.height else dp(70)
+        val below = fab.translationY + dp(150) + dp(48) + ph + dp(16) < content.height
+        p.translationX = fab.translationX
+        p.translationY = if (below) fab.translationY else fab.translationY - dp(56) - ph - dp(8)
         p.visibility = View.VISIBLE
         p.bringToFront()
+        p.removeCallbacks(hidePanel)
+        p.postDelayed(hidePanel, 7000)
     }
 
     private fun videoFullscreen() {
@@ -2430,104 +2512,283 @@ class MainActivity : AppCompatActivity() {
         sheet.show()
     }
 
-    /** Bottom sheet with every quality found: 1  1280x720  MP4  (i)  >  */
+    private fun qh(label: String): Int {
+        Regex("\\d+x(\\d+)").find(label)?.let { return it.groupValues[1].toIntOrNull() ?: 0 }
+        Regex("(\\d+)p").find(label)?.let { return it.groupValues[1].toIntOrNull() ?: 0 }
+        return 0
+    }
+
+    private fun extOf(url: String): String {
+        val p = (Uri.parse(url).path ?: "").lowercase()
+        return p.substringAfterLast('.', "mp4").uppercase().take(4)
+    }
+
+    /** Groups the sniffed links into videos: the one playing now, and all others. Blocking. */
+    private fun buildGroups(t: BTab, ua: String, ref: String): List<VGroup> {
+        val srcs = t.videos.toList()
+        val playing = t.playing.toSet()
+        val out = mutableListOf<VGroup>()
+        val direct = mutableListOf<VideoSrc>()
+        val rest = mutableListOf<VideoSrc>()
+        for (v in srcs) {
+            val low = v.url.lowercase()
+            if (low.contains(".mpd")) continue
+            if (low.contains(".m3u8")) rest.add(v)
+            else if (playing.contains(v.url)) direct.add(v)
+            else rest.add(v)
+        }
+        if (direct.isNotEmpty()) {
+            val g = VGroup(mutableListOf(), mutableSetOf(), 0L)
+            for (v in direct) {
+                g.rows.add(VRow(v.label, extOf(v.url), v.url, false))
+                g.keys.add(v.url)
+                g.seen = maxOf(g.seen, v.time)
+            }
+            out.add(g)
+        }
+        for (v in rest) {
+            if (v.url.lowercase().contains(".m3u8")) {
+                val vs = try {
+                    VideoDl.variants(v.url, ua, ref)
+                } catch (e: Exception) {
+                    listOf(VideoDl.Variant(v.label.ifEmpty { "Stream" }, v.url, 0))
+                }
+                val g = VGroup(mutableListOf(), mutableSetOf(v.url), v.time)
+                for (x in vs) {
+                    g.rows.add(VRow(x.label, "HLS", x.url, true))
+                    g.keys.add(x.url)
+                }
+                out.add(g)
+            } else {
+                out.add(VGroup(mutableListOf(VRow(v.label, extOf(v.url), v.url, false)), mutableSetOf(v.url), v.time))
+            }
+        }
+        // a media playlist that is just one quality of a master playlist belongs to that master
+        val masters = out.filter { it.keys.size > 1 }
+        val kept = out.filter { g ->
+            if (g.keys.size == 1) {
+                val m = masters.firstOrNull { it !== g && it.keys.contains(g.rows[0].url) }
+                if (m != null) {
+                    m.seen = maxOf(m.seen, g.seen)
+                    false
+                } else true
+            } else true
+        }
+        for (g in kept) g.rows.sortByDescending { qh(it.label) }
+        return kept
+    }
+
+    private fun makeRow(
+        sheet: BottomSheetDialog, list: LinearLayout, r: VRow, idx: Int, ua: String, ref: String, title: String
+    ) {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(20), dp(6), dp(8), dp(6))
+        val num = tv(idx.toString(), 18f)
+        num.gravity = Gravity.CENTER
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val lab = tv(r.label.ifEmpty { "Video" }, 19f)
+        val sub = tv("", 12f, 0xFF999999.toInt())
+        sub.visibility = View.GONE
+        col.addView(lab)
+        col.addView(sub)
+        val typ = tv(r.type, 16f, 0xFFCCCCCC.toInt())
+        typ.setPadding(0, 0, dp(8), 0)
+        val info = iconButton(R.drawable.ic_info, 44, 52)
+        val play = iconButton(R.drawable.ic_play, 44, 52)
+        row.addView(num, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(16) })
+        row.addView(typ)
+        row.addView(info)
+        row.addView(play)
+        val go = {
+            sheet.dismiss()
+            startVideoDownload(r.hls, r.url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref)
+        }
+        row.setOnClickListener { go() }
+        play.setOnClickListener { go() }
+        info.setOnClickListener { videoInfo(r.url) }
+        list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+        val line = View(this)
+        line.setBackgroundColor(0xFF333333.toInt())
+        list.addView(line, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        })
+        if (!r.hls) {
+            Thread {
+                val p = VideoDl.probe(r.url, ua, ref)
+                runOnUiThread {
+                    if (p.w > 0 && p.h > 0) lab.text = p.w.toString() + "x" + p.h
+                    if (p.size > 0) {
+                        sub.text = Formatter.formatShortFileSize(this, p.size)
+                        sub.visibility = View.VISIBLE
+                    }
+                }
+            }.start()
+        }
+    }
+
+    /**
+     * Download sheet: preview + title of the video that is playing, its qualities,
+     * and a "Master" row that opens every other video found on the page.
+     */
     private fun videoSheet() {
         val t = cur ?: return
-        val srcs = t.videos.toList().reversed()
-        if (srcs.isEmpty()) return
+        if (t.videos.isEmpty()) return
         val ua = t.webView.settings.userAgentString ?: DESKTOP_UA
         val ref = t.url
         val title = t.title
         val (sheet, box) = sheetBox()
+
+        // --- preview header
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        head.gravity = Gravity.CENTER_VERTICAL
+        head.setPadding(dp(20), dp(18), dp(20), dp(14))
+        val thumb = ImageView(this)
+        thumb.scaleType = ImageView.ScaleType.CENTER_CROP
+        val tbg = GradientDrawable()
+        tbg.cornerRadius = dp(12).toFloat()
+        tbg.setColor(0xFF000000.toInt())
+        thumb.background = tbg
+        thumb.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, dp(12).toFloat())
+            }
+        }
+        thumb.clipToOutline = true
+        val tcol = LinearLayout(this)
+        tcol.orientation = LinearLayout.VERTICAL
+        val ttl = tv(title.ifBlank { hostOf(ref) }, 16f)
+        ttl.maxLines = 2
+        ttl.ellipsize = android.text.TextUtils.TruncateAt.END
+        val tinfo = tv("Playing now", 13f, 0xFF999999.toInt())
+        tcol.addView(ttl)
+        tcol.addView(tinfo)
+        head.addView(thumb, LinearLayout.LayoutParams(dp(128), dp(72)))
+        head.addView(tcol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(14) })
+        box.addView(head)
+        val hline = View(this)
+        hline.setBackgroundColor(0xFF333333.toInt())
+        box.addView(hline, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        })
+
         val list = LinearLayout(this)
         list.orientation = LinearLayout.VERTICAL
-        list.setPadding(0, dp(8), 0, dp(12))
+        list.setPadding(0, dp(4), 0, dp(12))
         val loading = tv("Looking for qualities...", 14f, 0xFF999999.toInt())
         loading.setPadding(dp(24), dp(18), dp(24), dp(18))
         list.addView(loading)
         val sv = ScrollView(this)
         sv.addView(list)
         box.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        var count = 0
+        showSheet(sheet, box)
 
-        fun addRow(label: String, type: String, url: String, hls: Boolean): TextView {
-            if (loading.parent != null) list.removeView(loading)
-            count++
-            val row = LinearLayout(this)
-            row.orientation = LinearLayout.HORIZONTAL
-            row.gravity = Gravity.CENTER_VERTICAL
-            row.setPadding(dp(20), dp(6), dp(8), dp(6))
-            val num = tv(count.toString(), 18f)
-            num.gravity = Gravity.CENTER
-            val col = LinearLayout(this)
-            col.orientation = LinearLayout.VERTICAL
-            val lab = tv(label.ifEmpty { "Video" }, 19f)
-            val sub = tv("", 12f, 0xFF999999.toInt())
-            sub.visibility = View.GONE
-            col.addView(lab)
-            col.addView(sub)
-            val typ = tv(type, 16f, 0xFFCCCCCC.toInt())
-            typ.setPadding(0, 0, dp(8), 0)
-            val info = iconButton(R.drawable.ic_info, 44, 52)
-            val play = iconButton(R.drawable.ic_play, 44, 52)
-            row.addView(num, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT))
-            row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(16) })
-            row.addView(typ)
-            row.addView(info)
-            row.addView(play)
-            val go = {
-                sheet.dismiss()
-                startVideoDownload(hls, url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref)
-            }
-            row.setOnClickListener { go() }
-            play.setOnClickListener { go() }
-            info.setOnClickListener { videoInfo(url) }
-            list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
-            val line = View(this)
-            line.setBackgroundColor(0xFF333333.toInt())
-            list.addView(line, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
-                leftMargin = dp(16)
-                rightMargin = dp(16)
-            })
-            sub.tag = lab
-            return sub
-        }
-
-        for (v in srcs) {
-            val low = v.url.lowercase()
-            val path = (Uri.parse(v.url).path ?: "").lowercase()
-            if (path.endsWith(".m3u8") || low.contains(".m3u8")) {
-                Thread {
-                    try {
-                        val vs = VideoDl.variants(v.url, ua, ref)
-                        runOnUiThread {
-                            for (x in vs) addRow(x.label, "HLS", x.url, true)
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread { addRow(v.label.ifEmpty { "Stream" }, "HLS", v.url, true) }
+        // --- live preview frame of the playing video
+        val js = "(function(){var vs=document.querySelectorAll('video'),v=null;" +
+            "for(var i=0;i<vs.length;i++){if(!vs[i].paused&&vs[i].readyState>=2){v=vs[i];break;}}" +
+            "if(!v)v=vs[0];if(!v)return '';var img='';" +
+            "try{var w=320,h=Math.round(w*(v.videoHeight||9)/(v.videoWidth||16));var c=document.createElement('canvas');" +
+            "c.width=w;c.height=h;c.getContext('2d').drawImage(v,0,0,w,h);img=c.toDataURL('image/jpeg',0.7);}catch(e){img=v.poster||'';}" +
+            "return JSON.stringify({i:img,d:isFinite(v.duration)?v.duration:0,w:v.videoWidth,h:v.videoHeight,p:!v.paused});})()"
+        t.webView.evaluateJavascript(js) { r ->
+            try {
+                val s = org.json.JSONTokener(r).nextValue() as? String
+                if (!s.isNullOrEmpty()) {
+                    val o = JSONObject(s)
+                    val img = o.optString("i")
+                    val d = o.optDouble("d", 0.0).toInt()
+                    val parts = mutableListOf<String>()
+                    parts.add(if (o.optBoolean("p")) "Playing now" else "Paused")
+                    if (o.optInt("w") > 0) parts.add(o.optInt("w").toString() + "x" + o.optInt("h"))
+                    if (d > 0) parts.add(String.format(java.util.Locale.US, "%d:%02d", d / 60, d % 60))
+                    tinfo.text = parts.joinToString("  •  ")
+                    if (img.startsWith("data:image")) {
+                        val bytes = android.util.Base64.decode(img.substringAfter(','), android.util.Base64.DEFAULT)
+                        thumb.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
+                    } else if (img.startsWith("http")) {
+                        Thread {
+                            try {
+                                val c = VideoDl.openConn(img, ua, ref)
+                                val bmp = c.inputStream.use { BitmapFactory.decodeStream(it) }
+                                c.disconnect()
+                                runOnUiThread { thumb.setImageBitmap(bmp) }
+                            } catch (_: Exception) {
+                            }
+                        }.start()
                     }
-                }.start()
-            } else if (path.endsWith(".mpd") || low.contains(".mpd")) {
-                continue
-            } else {
-                val ext = path.substringAfterLast('.', "mp4").uppercase().take(4)
-                val sub = addRow(v.label, ext, v.url, false)
-                Thread {
-                    val p = VideoDl.probe(v.url, ua, ref)
-                    runOnUiThread {
-                        val lab = sub.tag as? TextView
-                        if (p.w > 0 && p.h > 0 && lab != null) lab.text = p.w.toString() + "x" + p.h
-                        if (p.size > 0) {
-                            sub.text = Formatter.formatShortFileSize(this, p.size)
-                            sub.visibility = View.VISIBLE
-                        }
-                    }
-                }.start()
+                }
+            } catch (_: Exception) {
             }
         }
-        if (count == 0 && srcs.none { it.url.lowercase().contains(".m3u8") }) {
-            loading.text = "No downloadable video found on this page"
+
+        // --- qualities
+        Thread {
+            val groups = buildGroups(t, ua, ref)
+            runOnUiThread {
+                list.removeView(loading)
+                if (groups.isEmpty()) {
+                    list.addView(loading)
+                    loading.text = "No downloadable video found on this page"
+                    return@runOnUiThread
+                }
+                val playing = t.playing.toSet()
+                val current = groups.firstOrNull { g -> g.keys.any { playing.contains(it) } }
+                    ?: groups.maxByOrNull { it.seen }!!
+                var n = 0
+                for (r in current.rows) {
+                    n++
+                    makeRow(sheet, list, r, n, ua, ref, title)
+                }
+                val others = groups.filter { it !== current }.sortedByDescending { it.seen }
+                if (others.isNotEmpty()) {
+                    val m = LinearLayout(this)
+                    m.orientation = LinearLayout.HORIZONTAL
+                    m.gravity = Gravity.CENTER_VERTICAL
+                    m.setPadding(dp(20), 0, dp(12), 0)
+                    val mt = tv("Master", 19f)
+                    val mc = tv("   " + others.size + " other video" + (if (others.size > 1) "s" else ""), 13f, 0xFF999999.toInt())
+                    m.addView(mt)
+                    m.addView(mc, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    m.addView(iconView(R.drawable.ic_arrow_forward, 24))
+                    m.setOnClickListener { masterSheet(others, ua, ref, title) }
+                    list.addView(m, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+                }
+            }
+        }.start()
+    }
+
+    /** Every other video found on the page, grouped. */
+    private fun masterSheet(groups: List<VGroup>, ua: String, ref: String, title: String) {
+        val (sheet, box) = sheetBox()
+        val h = tv("Master  •  other videos on this page", 16f, 0xFFCCCCCC.toInt())
+        h.setPadding(dp(20), dp(20), dp(20), dp(10))
+        box.addView(h)
+        val list = LinearLayout(this)
+        list.orientation = LinearLayout.VERTICAL
+        list.setPadding(0, 0, 0, dp(12))
+        for (g in groups) {
+            val first = g.rows.firstOrNull()?.url ?: continue
+            val tail = (Uri.parse(first).lastPathSegment ?: "").take(40)
+            val gh = tv(hostOf(first) + (if (tail.isNotEmpty()) "  •  $tail" else ""), 13f, 0xFF999999.toInt())
+            gh.setPadding(dp(20), dp(12), dp(20), dp(4))
+            gh.maxLines = 1
+            gh.ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            list.addView(gh)
+            var n = 0
+            for (r in g.rows) {
+                n++
+                makeRow(sheet, list, r, n, ua, ref, title)
+            }
         }
+        val sv = ScrollView(this)
+        sv.addView(list)
+        box.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         showSheet(sheet, box)
     }
 
@@ -2795,10 +3056,14 @@ class MainActivity : AppCompatActivity() {
         fun videoPlaying(json: String) {
             try {
                 val a = JSONArray(json)
+                val urls = mutableListOf<String>()
                 for (i in 0 until a.length()) {
                     val o = a.getJSONObject(i)
-                    addVideo(tab, o.optString("u"), o.optString("l"))
+                    val u = o.optString("u").substringBefore('#')
+                    if (u.startsWith("http")) urls.add(u)
+                    addVideo(tab, u, o.optString("l"))
                 }
+                tab.playing = urls
             } catch (_: Exception) {
             }
         }

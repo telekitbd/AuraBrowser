@@ -30,10 +30,17 @@ class BTab(val webView: WebView, val incognito: Boolean) {
     @Volatile
     var quality = ""
 
+    /** URLs of the <video> element that is playing right now (empty for blob / MSE players). */
+    @Volatile
+    var playing: List<String> = emptyList()
+
     val videos = java.util.concurrent.CopyOnWriteArrayList<VideoSrc>()
 }
 
-class VideoSrc(val url: String, var label: String)
+class VideoSrc(val url: String, var label: String) {
+    @Volatile
+    var time: Long = System.currentTimeMillis()
+}
 
 class Store(ctx: Context) {
     private val sp = ctx.getSharedPreferences("aura", Context.MODE_PRIVATE)

@@ -63,3 +63,10 @@ All 30 menu options are wired up:
 
 ## v2.3
 - Safe Browsing is always off (app-level, per WebView, and warning pages are skipped); no restart needed
+
+## v2.4
+- One floating button opens the 3-action panel (PiP / full screen / download)
+- Download sheet shows a preview + title of the video that is playing and only its qualities; all other links are under "Master"
+
+## v2.5
+- Media button: tap opens the 3 buttons right below it (above it if the button is low); drag the button anywhere
