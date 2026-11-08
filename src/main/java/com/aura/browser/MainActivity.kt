@@ -2221,7 +2221,15 @@ class MainActivity : AppCompatActivity() {
     private var videoFab: ImageView? = null
     private val hidePanel = Runnable { videoPanel?.visibility = View.GONE }
 
-    private class VRow(val label: String, val type: String, val url: String, val hls: Boolean)
+    private class VRow(var label: String, val type: String, val url: String, val hls: Boolean) {
+        var audio: String? = null
+        var info: VideoDl.Info? = null
+        var thumb: Bitmap? = null
+        var live = false
+        var enc = false
+    }
+
+    private val inspectCache = java.util.concurrent.ConcurrentHashMap<String, VideoDl.Info>()
 
     private class VGroup(val rows: MutableList<VRow>, val keys: MutableSet<String>, var seen: Long)
     private var customWrap: ViewGroup? = null
@@ -2570,7 +2578,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 val g = VGroup(mutableListOf(), mutableSetOf(v.url), v.time)
                 for (x in vs) {
-                    g.rows.add(VRow(x.label, "HLS", x.url, true))
+                    val nr = VRow(x.label, "HLS", x.url, true)
+                    nr.audio = x.audio
+                    g.rows.add(nr)
                     g.keys.add(x.url)
                 }
                 out.add(g)
@@ -2589,8 +2599,60 @@ class MainActivity : AppCompatActivity() {
                 } else true
             } else true
         }
+        // look inside every stream: drop audio-only / broken ones, join separate audio to video-only ones
+        val hlsRows = kept.flatMap { it.rows }.filter { it.hls }.take(14)
+        if (hlsRows.isNotEmpty()) {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+            try {
+                val tasks = hlsRows.map { r ->
+                    java.util.concurrent.Callable<Unit> {
+                        val c = inspectCache[r.url]
+                        if (c != null) r.info = c
+                        else {
+                            val i = VideoDl.inspectHls(applicationContext, r.url, ua, ref)
+                            if (i.ok) inspectCache[r.url] = i
+                            r.info = i
+                        }
+                        Unit
+                    }
+                }
+                pool.invokeAll(tasks, 20, java.util.concurrent.TimeUnit.SECONDS)
+            } finally {
+                pool.shutdownNow()
+            }
+            val audios = hlsRows.filter { val i = it.info; i != null && i.ok && !i.hasVideo && i.hasAudio }
+            for (r in hlsRows) {
+                val i = r.info ?: continue
+                if (!i.ok) continue
+                r.live = i.live
+                r.enc = i.enc
+                r.thumb = i.thumb
+                if (i.hasVideo) {
+                    if (i.w > 0 && i.h > 0) r.label = i.w.toString() + "x" + i.h
+                    if (!i.hasAudio && r.audio == null) r.audio = bestAudio(r.url, audios)
+                }
+            }
+            for (g in kept) g.rows.removeAll { rr -> val i = rr.info; i != null && i.ok && !i.hasVideo && !i.enc }
+        }
         for (g in kept) g.rows.sortByDescending { qh(it.label) }
-        return kept
+        return kept.filter { it.rows.isNotEmpty() }
+    }
+
+    private fun bestAudio(url: String, audios: List<VRow>): String? {
+        val h = hostOf(url)
+        var best: VRow? = null
+        var bl = -1
+        for (a in audios) {
+            if (hostOf(a.url) != h) continue
+            var n = 0
+            val m = minOf(url.length, a.url.length)
+            while (n < m && url[n] == a.url[n]) n++
+            if (n > bl) {
+                bl = n
+                best = a
+            }
+        }
+        return best?.url
     }
 
     /** Plays one quality in-app so it can be checked before downloading. */
@@ -2635,6 +2697,23 @@ class MainActivity : AppCompatActivity() {
             true
         }
         dlg.setOnDismissListener { try { vv.stopPlayback() } catch (_: Exception) {} }
+        if (r.hls) {
+            // plays the first seconds of exactly what would be saved (video + audio joined)
+            dlg.show()
+            Thread {
+                val f = VideoDl.makePreview(applicationContext, r.url, r.audio, ua, ref)
+                runOnUiThread {
+                    if (!dlg.isShowing) return@runOnUiThread
+                    if (f == null) {
+                        spin.visibility = View.GONE
+                        toast("Cannot preview this quality")
+                    } else {
+                        vv.setVideoPath(f.absolutePath)
+                    }
+                }
+            }.start()
+            return
+        }
         try {
             vv.setVideoURI(Uri.parse(r.url), hashMapOf("User-Agent" to ua, "Referer" to ref))
         } catch (_: Exception) {
@@ -2687,16 +2766,28 @@ class MainActivity : AppCompatActivity() {
         row.addView(dl)
         val go = {
             sheet.dismiss()
-            startVideoDownload(r.hls, r.url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref)
+            startVideoDownload(r.hls, r.url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref, r.audio)
         }
         val pv = { previewQuality(r, lab.text.toString(), ua, ref, go) }
         // only the download button downloads; tapping the row or the play button previews
         row.setOnClickListener { pv() }
         thumb.setOnClickListener { pv() }
         prev.setOnClickListener { pv() }
-        dl.setOnClickListener { go() }
+        dl.setOnClickListener { if (r.enc) toast("This video is encrypted and cannot be saved") else go() }
+        if (r.enc) {
+            sub.text = "Encrypted - cannot be saved"
+            sub.visibility = View.VISIBLE
+            dl.alpha = 0.3f
+        } else if (r.hls && r.live) {
+            sub.text = "LIVE - saves what is available now"
+            sub.visibility = View.VISIBLE
+        }
+        r.thumb?.let { b ->
+            thumb.setImageBitmap(b)
+            if (head != null && head.drawable == null) head.setImageBitmap(b)
+        }
         info.setOnClickListener { videoInfo(r.url) }
-        Thread {
+        if (!r.hls) Thread {
             try {
                 val mmr = android.media.MediaMetadataRetriever()
                 mmr.setDataSource(r.url, hashMapOf("User-Agent" to ua, "Referer" to ref))
@@ -2721,6 +2812,14 @@ class MainActivity : AppCompatActivity() {
             Thread {
                 val p = VideoDl.probe(r.url, ua, ref)
                 runOnUiThread {
+                    // not a real video (web page, image, json, tiny file): hide it
+                    if (p.type.startsWith("text/") || p.type.contains("html") || p.type.contains("json") ||
+                        p.type.startsWith("image/") || (p.w == 0 && p.h == 0 && p.size in 1..60000)
+                    ) {
+                        row.visibility = View.GONE
+                        line.visibility = View.GONE
+                        return@runOnUiThread
+                    }
                     if (p.w > 0 && p.h > 0) lab.text = p.w.toString() + "x" + p.h
                     if (p.size > 0) {
                         sub.text = Formatter.formatShortFileSize(this, p.size)
@@ -2962,10 +3061,10 @@ class MainActivity : AppCompatActivity() {
         showSheet(sheet, box)
     }
 
-    private fun startVideoDownload(hls: Boolean, url: String, label: String, title: String, ua: String, ref: String) {
+    private fun startVideoDownload(hls: Boolean, url: String, label: String, title: String, ua: String, ref: String, audio: String? = null) {
         val base = fileBase(title, label)
         if (hls) {
-            VideoDl.downloadHls(applicationContext, store, url, base, ua, ref) { m ->
+            VideoDl.downloadHls(applicationContext, store, url, audio, base, ua, ref) { m ->
                 runOnUiThread { toast(m) }
             }
         } else {
