@@ -268,6 +268,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && customView != null) setBars(true)
+    }
+
     override fun onResume() {
         super.onResume()
         loadPrefs()
@@ -650,6 +655,8 @@ class MainActivity : AppCompatActivity() {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                     )
                 )
+                topBar.visibility = View.GONE
+                bottomBar.visibility = View.GONE
                 setBars(true)
                 requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 val lp = window.attributes
@@ -696,6 +703,8 @@ class MainActivity : AppCompatActivity() {
         customView = null
         customCb?.onCustomViewHidden()
         customCb = null
+        topBar.visibility = if (fullscreen) View.GONE else View.VISIBLE
+        bottomBar.visibility = if (fullscreen) View.GONE else View.VISIBLE
         setBars(fullscreen)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         val lp = window.attributes
@@ -2367,11 +2376,11 @@ class MainActivity : AppCompatActivity() {
             fbg.shape = GradientDrawable.OVAL
             fbg.setColor(0xFF7C6FE0.toInt())
             fab.background = fbg
-            fab.setPadding(dp(12), dp(12), dp(12), dp(12))
-            fab.elevation = dp(8).toFloat()
-            val flp = FrameLayout.LayoutParams(dp(48), dp(48))
-            flp.gravity = Gravity.TOP or Gravity.END
-            flp.setMargins(0, dp(150), dp(10), 0)
+            fab.setPadding(dp(8), dp(8), dp(8), dp(8))
+            fab.elevation = dp(6).toFloat()
+            val flp = FrameLayout.LayoutParams(dp(34), dp(34))
+            flp.gravity = Gravity.BOTTOM or Gravity.END
+            flp.setMargins(0, 0, dp(8), dp(10))
             content.addView(fab, flp)
             // tap = open / close the panel, drag = move the button anywhere
             val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
@@ -2397,11 +2406,10 @@ class MainActivity : AppCompatActivity() {
                             videoPanel?.visibility = View.GONE
                         }
                         if (moved) {
-                            val minX = -(content.width - dp(48) - dp(10)).toFloat()
-                            val minY = -dp(150).toFloat()
-                            val maxY = (content.height - dp(150) - dp(48)).toFloat()
-                            v.translationX = (startTx + mx).coerceIn(minOf(minX, 0f), 0f)
-                            v.translationY = (startTy + my).coerceIn(minY, maxOf(minY, maxY))
+                            val minX = -(content.width - dp(34) - dp(8)).toFloat()
+                            val minY = -(content.height - dp(34) - dp(10)).toFloat()
+                            v.translationX = (startTx + mx).coerceIn(minOf(minX, 0f), dp(8).toFloat())
+                            v.translationY = (startTy + my).coerceIn(minOf(minY, 0f), dp(10).toFloat())
                         }
                     }
                     android.view.MotionEvent.ACTION_UP -> if (!moved) toggleVideoPanel()
@@ -2427,8 +2435,8 @@ class MainActivity : AppCompatActivity() {
             val lp = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            lp.gravity = Gravity.TOP or Gravity.END
-            lp.setMargins(0, dp(150) + dp(56), dp(2), 0)
+            lp.gravity = Gravity.BOTTOM or Gravity.END
+            lp.setMargins(0, 0, dp(2), dp(10) + dp(34) + dp(8))
             content.addView(p, lp)
             videoPanel = p
         }
@@ -2445,9 +2453,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val ph = if (p.height > 0) p.height else dp(70)
-        val below = fab.translationY + dp(150) + dp(48) + ph + dp(16) < content.height
+        // the button sits low by default, so the panel opens above it; below it when the button was dragged to the top
+        val fabTop = content.height - dp(10) - dp(34) + fab.translationY
+        val above = fabTop >= ph + dp(8)
         p.translationX = fab.translationX
-        p.translationY = if (below) fab.translationY else fab.translationY - dp(56) - ph - dp(8)
+        p.translationY = if (above) fab.translationY else fab.translationY + dp(34) + dp(16) + ph
         p.visibility = View.VISIBLE
         p.bringToFront()
         p.removeCallbacks(hidePanel)
@@ -2537,6 +2547,12 @@ class MainActivity : AppCompatActivity() {
             else rest.add(v)
         }
         if (direct.isNotEmpty()) {
+            val hosts = direct.map { hostOf(it.url) }.toSet()
+            val same = rest.filter { !it.url.lowercase().contains(".m3u8") && hosts.contains(hostOf(it.url)) }
+            for (v in same) {
+                direct.add(v)
+                rest.remove(v)
+            }
             val g = VGroup(mutableListOf(), mutableSetOf(), 0L)
             for (v in direct) {
                 g.rows.add(VRow(v.label, extOf(v.url), v.url, false))
