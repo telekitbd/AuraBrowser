@@ -225,6 +225,108 @@ object AdBlock {
 })();
 """
 
+    /**
+     * Many sites play video through MediaSource (blob: address) in small pieces. This copies the pieces the
+     * player receives so the playing video can be saved later. Runs at document start.
+     */
+    const val MSE_JS = """
+(function(){
+  if(window.__auraMse){return;}
+  window.__auraMse=1;
+  var MS=window.MediaSource,SB=window.SourceBuffer;
+  if(!MS||!SB){return;}
+  var CAP=120*1024*1024,msList=[],recs=[];
+  function track(ms){
+    if(msList.indexOf(ms)<0){
+      msList.push(ms);
+      if(msList.length>3){
+        var old=msList.shift();
+        for(var i=recs.length-1;i>=0;i--){if(recs[i].ms===old){recs[i].c=[];recs.splice(i,1);}}
+      }
+    }
+  }
+  var asb=MS.prototype.addSourceBuffer;
+  MS.prototype.addSourceBuffer=function(m){
+    var sb=asb.apply(this,arguments);
+    try{track(this);var r={m:String(m),c:[],n:0,full:false,ms:this};sb.__rec=r;recs.push(r);}catch(e){}
+    return sb;
+  };
+  var ap=SB.prototype.appendBuffer;
+  SB.prototype.appendBuffer=function(d){
+    try{
+      var r=this.__rec;
+      if(r&&!r.full){
+        var u=(d instanceof ArrayBuffer)?new Uint8Array(d):new Uint8Array(d.buffer,d.byteOffset,d.byteLength);
+        if(r.n+u.length>CAP){r.full=true;}else{r.c.push(u.slice());r.n+=u.length;}
+      }
+    }catch(e){}
+    return ap.apply(this,arguments);
+  };
+  var cou=URL.createObjectURL;
+  URL.createObjectURL=function(o){
+    var u=cou.apply(this,arguments);
+    try{if(o instanceof MS){o.__url=u;}}catch(e){}
+    return u;
+  };
+  function target(){
+    var vs=document.querySelectorAll('video'),best=null;
+    for(var i=0;i<vs.length;i++){
+      var v=vs[i];
+      for(var j=0;j<msList.length;j++){
+        if(msList[j].__url&&msList[j].__url===v.currentSrc){
+          if(!best||(!v.paused&&best.v.paused)){best={v:v,ms:msList[j]};}
+        }
+      }
+    }
+    if(best){return best;}
+    if(msList.length){return {v:vs[0]||null,ms:msList[msList.length-1]};}
+    return null;
+  }
+  function list(ms){
+    var out=[];
+    for(var i=0;i<recs.length;i++){if(recs[i].ms===ms&&recs[i].n>0){out.push(recs[i]);}}
+    return out;
+  }
+  window.__auraMseInfo=function(){
+    try{
+      var t=target();
+      if(!t){return '';}
+      var l=list(t.ms),n=0,full=false;
+      for(var i=0;i<l.length;i++){n+=l[i].n;if(l[i].full){full=true;}}
+      if(!n){return '';}
+      var v=t.v;
+      return JSON.stringify({n:n,full:full,w:v?v.videoWidth:0,h:v?v.videoHeight:0,d:(v&&isFinite(v.duration))?v.duration:0});
+    }catch(e){return '';}
+  };
+  window.__auraMseSend=function(tk){
+    try{
+      var t=target();
+      var l=t?list(t.ms):[];
+      if(!l.length){AuraBridge.mseFail(tk);return;}
+      var k=0,S=600*1024;
+      function nextBuf(){
+        if(k>=l.length){AuraBridge.mseAll(tk,l.length);return;}
+        var r=l[k],blob=new Blob(r.c),off=0;
+        function nextSlice(){
+          if(off>=blob.size){AuraBridge.mseEnd(tk,k,r.m);k++;nextBuf();return;}
+          var fr=new FileReader();
+          fr.onload=function(){
+            var s=String(fr.result);
+            AuraBridge.mseChunk(tk,k,s.substring(s.indexOf(',')+1));
+            off+=S;
+            setTimeout(nextSlice,0);
+          };
+          fr.onerror=function(){AuraBridge.mseFail(tk);};
+          fr.readAsDataURL(blob.slice(off,off+S));
+        }
+        nextSlice();
+      }
+      nextBuf();
+    }catch(e){try{AuraBridge.mseFail(tk);}catch(x){}}
+  };
+})();
+"""
+
     /** Reports a playing video and its sources (with quality labels) to the app. */
     const val VIDEO_JS = """
 (function(){
