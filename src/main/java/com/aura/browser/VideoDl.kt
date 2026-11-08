@@ -465,4 +465,64 @@ object VideoDl {
             }
         }.start()
     }
+
+    /** Saves the pieces copied from a MediaSource player (video and maybe separate audio) as one MP4. */
+    fun saveMse(
+        ctx: Context, store: Store, files: Map<Int, File>, mimes: Map<Int, String>,
+        baseName: String, url: String, msg: (String) -> Unit
+    ) {
+        Thread {
+            val id = -System.currentTimeMillis()
+            val tmpO = File(ctx.cacheDir, "mse_out_" + (-id) + ".mp4")
+            var uri: Uri? = null
+            try {
+                fun isAudio(m: String) = m.lowercase().startsWith("audio/")
+                val vids = files.filter { (k, f) -> !isAudio(mimes[k] ?: "") && f.length() > 0 }.values
+                    .sortedByDescending { it.length() }
+                val auds = files.filter { (k, f) -> isAudio(mimes[k] ?: "") && f.length() > 0 }.values
+                    .sortedByDescending { it.length() }
+                val vf = vids.firstOrNull()
+                if (vf == null) {
+                    msg("No video data captured")
+                    return@Thread
+                }
+                val joined = try {
+                    mux(vf, auds.firstOrNull(), tmpO)
+                } catch (_: Exception) {
+                    false
+                }
+                val src = if (joined) tmpO else vf
+                val name = baseName + ".mp4"
+                val cv = ContentValues()
+                cv.put(MediaStore.Downloads.DISPLAY_NAME, name)
+                cv.put(MediaStore.Downloads.MIME_TYPE, "video/mp4")
+                cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                cv.put(MediaStore.Downloads.IS_PENDING, 1)
+                val target = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+                    ?: throw Exception("no file")
+                uri = target
+                ctx.contentResolver.openOutputStream(target)!!.use { out ->
+                    src.inputStream().use { it.copyTo(out) }
+                }
+                val done = ContentValues()
+                done.put(MediaStore.Downloads.IS_PENDING, 0)
+                ctx.contentResolver.update(target, done, null, null)
+                val s = State(1)
+                s.done = 1
+                s.status = 1
+                states[id] = s
+                store.addDownload(id, name, url, target.toString())
+                msg("Saved: $name")
+            } catch (e: Exception) {
+                try {
+                    uri?.let { ctx.contentResolver.delete(it, null, null) }
+                } catch (_: Exception) {
+                }
+                msg("Could not save the video")
+            } finally {
+                for (f in files.values) f.delete()
+                tmpO.delete()
+            }
+        }.start()
+    }
 }

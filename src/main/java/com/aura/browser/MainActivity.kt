@@ -362,6 +362,7 @@ class MainActivity : AppCompatActivity() {
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 WebViewCompat.addDocumentStartJavaScript(wv, AdBlock.TAP_JS, setOf("*"))
+                WebViewCompat.addDocumentStartJavaScript(wv, AdBlock.MSE_JS, setOf("*"))
                 if (store.getBool("adblock", true)) {
                     WebViewCompat.addDocumentStartJavaScript(
                         wv, AdBlock.YT_JS,
@@ -2333,6 +2334,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val inspectCache = java.util.concurrent.ConcurrentHashMap<String, VideoDl.Info>()
+    private class MseJob(val base: String, val ref: String) {
+        val files = java.util.concurrent.ConcurrentHashMap<Int, java.io.File>()
+        val mimes = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    }
+
+    private val mseJobs = java.util.concurrent.ConcurrentHashMap<String, MseJob>()
+
+    private fun startMseCapture(t: BTab, title: String) {
+        val tk = System.currentTimeMillis().toString()
+        mseJobs[tk] = MseJob(fileBase(title, ""), t.url)
+        toast("Saving the playing video...")
+        t.webView.evaluateJavascript("window.__auraMseSend('" + tk + "');", null)
+    }
+
     private val variantCache = java.util.concurrent.ConcurrentHashMap<String, List<VideoDl.Variant>>()
     private val prefetching: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
@@ -2968,7 +2983,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     // not a real video (web page, image, json, tiny file): hide it
                     if (p.type.startsWith("text/") || p.type.contains("html") || p.type.contains("json") ||
-                        p.type.startsWith("image/") || (p.w == 0 && p.h == 0 && p.size in 1..60000)
+                        p.type.startsWith("image/") || (p.size in 1..60000)
                     ) {
                         row.visibility = View.GONE
                         line.visibility = View.GONE
@@ -3031,6 +3046,11 @@ class MainActivity : AppCompatActivity() {
             rightMargin = dp(16)
         })
 
+        val mseBox = LinearLayout(this)
+        mseBox.orientation = LinearLayout.VERTICAL
+        mseBox.setPadding(dp(16), dp(4), dp(16), dp(4))
+        box.addView(mseBox)
+
         val list = LinearLayout(this)
         list.orientation = LinearLayout.VERTICAL
         list.setPadding(0, dp(4), 0, dp(12))
@@ -3076,6 +3096,28 @@ class MainActivity : AppCompatActivity() {
                         }.start()
                     }
                 }
+            } catch (_: Exception) {
+            }
+        }
+
+        // --- the playing video as the page's player really receives it (works for blob: / MediaSource players)
+        t.webView.evaluateJavascript("(window.__auraMseInfo?window.__auraMseInfo():'')") { r ->
+            try {
+                val str = org.json.JSONTokener(r).nextValue() as? String
+                if (str.isNullOrEmpty() || !sheet.isShowing) return@evaluateJavascript
+                val o = JSONObject(str)
+                val n = o.optLong("n")
+                if (n < 150_000L) return@evaluateJavascript
+                val parts = mutableListOf<String>()
+                if (o.optInt("w") > 0) parts.add(o.optInt("w").toString() + "x" + o.optInt("h"))
+                parts.add(Formatter.formatShortFileSize(this, n) + (if (o.optBoolean("full")) "+" else ""))
+                parts.add("tap to save")
+                mseBox.addView(
+                    uiRow(R.drawable.ic_download, "Playing video", parts.joinToString("  •  "), UiColors.GREEN) {
+                        sheet.dismiss()
+                        startMseCapture(t, title)
+                    }
+                )
             } catch (_: Exception) {
             }
         }
@@ -3493,6 +3535,38 @@ class MainActivity : AppCompatActivity() {
                 tab.playing = urls
             } catch (_: Exception) {
             }
+        }
+
+        @JavascriptInterface
+        fun mseChunk(tk: String, k: Int, b64: String) {
+            val job = mseJobs[tk] ?: return
+            try {
+                val f = job.files.getOrPut(k) { java.io.File(cacheDir, "mse_" + tk + "_" + k) }
+                java.io.FileOutputStream(f, true).use {
+                    it.write(android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        @JavascriptInterface
+        fun mseEnd(tk: String, k: Int, mime: String) {
+            mseJobs[tk]?.mimes?.put(k, mime)
+        }
+
+        @JavascriptInterface
+        fun mseAll(tk: String, n: Int) {
+            val job = mseJobs.remove(tk) ?: return
+            VideoDl.saveMse(applicationContext, store, job.files, job.mimes, job.base, job.ref) { m ->
+                runOnUiThread { toast(m) }
+            }
+        }
+
+        @JavascriptInterface
+        fun mseFail(tk: String) {
+            val job = mseJobs.remove(tk)
+            job?.files?.values?.forEach { it.delete() }
+            runOnUiThread { toast("Could not capture this video") }
         }
 
         @JavascriptInterface
