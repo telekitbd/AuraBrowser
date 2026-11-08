@@ -1314,13 +1314,67 @@ class MainActivity : AppCompatActivity() {
         toast(if (v) "Desktop site" else "Mobile site")
     }
 
+    private val trLangs = listOf(
+        "Bangla" to "bn", "English" to "en", "Hindi" to "hi", "Arabic" to "ar", "Urdu" to "ur",
+        "Chinese" to "zh-CN", "Spanish" to "es", "French" to "fr", "Russian" to "ru", "Japanese" to "ja",
+        "Korean" to "ko", "Turkish" to "tr", "Indonesian" to "id", "German" to "de"
+    )
+
+    /** Google's translate proxy: example.com -> example-com.translate.goog */
+    private fun translateUrl(url: String, lang: String): String? {
+        val u = Uri.parse(url)
+        val host = u.host ?: return null
+        if (host.endsWith(".translate.goog")) return null
+        val enc = host.replace("-", "--").replace(".", "-") + ".translate.goog"
+        val q = u.encodedQuery
+        return "https://" + enc + (u.encodedPath ?: "/") + "?" + (if (q.isNullOrEmpty()) "" else "$q&") +
+            "_x_tr_sl=auto&_x_tr_tl=" + lang + "&_x_tr_hl=en&_x_tr_pto=wapp"
+    }
+
+    private fun originalUrl(url: String): String? {
+        val u = Uri.parse(url)
+        val host = u.host ?: return null
+        if (!host.endsWith(".translate.goog")) return null
+        val orig = host.removeSuffix(".translate.goog").replace("--", "\u0000").replace("-", ".").replace("\u0000", "-")
+        val q = (u.encodedQuery ?: "").split("&").filter { it.isNotEmpty() && !it.startsWith("_x_tr_") }.joinToString("&")
+        return "https://" + orig + (u.encodedPath ?: "/") + (if (q.isEmpty()) "" else "?$q")
+    }
+
     private fun translate() {
         val t = cur ?: return
-        if (t.isHome) {
+        if (t.isHome || !t.url.startsWith("http")) {
             toast("Open a page first")
             return
         }
-        go("https://translate.google.com/translate?sl=auto&tl=bn&u=" + Uri.encode(t.url))
+        val (sheet, box) = sheetBox()
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(16), dp(20), dp(16), dp(24))
+        val head = uiHeader(R.drawable.ic_translate, UiColors.ACCENT, "Translate page", "Pick the language to read in")
+        body.addView(head.view)
+        val orig = originalUrl(t.url)
+        if (orig != null) {
+            body.addView(uiRow(R.drawable.ic_arrow_back, "Show original page", null, UiColors.GREEN) {
+                sheet.dismiss()
+                go(orig)
+            })
+        }
+        val last = store.getStr("tr_lang", "bn")
+        for ((name, code) in trLangs) {
+            body.addView(uiRow(R.drawable.ic_translate, name, null, UiColors.ACCENT, selected = code == last) {
+                sheet.dismiss()
+                store.setStr("tr_lang", code)
+                val target = translateUrl(orig ?: t.url, code)
+                if (target == null) toast("Cannot translate this page") else go(target)
+            })
+        }
+        val sv = ScrollView(this)
+        sv.addView(body)
+        box.addView(
+            sv,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.75f).toInt())
+        )
+        showSheet(sheet, box)
     }
 
     private fun shareUrl() {
@@ -2279,6 +2333,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val inspectCache = java.util.concurrent.ConcurrentHashMap<String, VideoDl.Info>()
+    private val variantCache = java.util.concurrent.ConcurrentHashMap<String, List<VideoDl.Variant>>()
+    private val prefetching: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Looks inside a stream in the background as soon as it is found, so the quality list opens fast. */
+    private fun prefetchStream(tab: BTab, url: String) {
+        if (!url.lowercase().contains(".m3u8") || !prefetching.add(url)) return
+        runOnUiThread {
+            val ua = try { tab.webView.settings.userAgentString ?: DESKTOP_UA } catch (_: Exception) { DESKTOP_UA }
+            val ref = tab.url
+            Thread {
+                try {
+                    val vs = variantCache[url] ?: VideoDl.variants(url, ua, ref).also { variantCache[url] = it }
+                    val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+                    try {
+                        val tasks = vs.take(8).filter { !inspectCache.containsKey(it.url) }.map { v ->
+                            java.util.concurrent.Callable<Unit> {
+                                val i = VideoDl.inspectHls(applicationContext, v.url, ua, ref)
+                                if (i.ok) inspectCache[v.url] = i
+                                Unit
+                            }
+                        }
+                        pool.invokeAll(tasks, 12, java.util.concurrent.TimeUnit.SECONDS)
+                    } finally {
+                        pool.shutdownNow()
+                    }
+                } catch (_: Exception) {
+                }
+            }.start()
+        }
+    }
 
     private class VGroup(val rows: MutableList<VRow>, val keys: MutableSet<String>, var seen: Long)
     private var customWrap: ViewGroup? = null
@@ -2392,6 +2476,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             if (tab.videos.size >= 30) return
             tab.videos.add(VideoSrc(clean, label.ifEmpty { guessQuality(clean) }))
+            prefetchStream(tab, clean)
         }
         runOnUiThread { if (tab === cur) updateVideoBtn() }
     }
@@ -2590,7 +2675,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Groups the sniffed links into videos: the one playing now, and all others. Blocking. */
-    private fun buildGroups(t: BTab, ua: String, ref: String): List<VGroup> {
+    private fun buildGroups(t: BTab, ua: String, ref: String, inspect: Boolean = true): List<VGroup> {
         val srcs = t.videos.toList()
         val playing = t.playing.toSet()
         val out = mutableListOf<VGroup>()
@@ -2621,7 +2706,7 @@ class MainActivity : AppCompatActivity() {
         for (v in rest) {
             if (v.url.lowercase().contains(".m3u8")) {
                 val vs = try {
-                    VideoDl.variants(v.url, ua, ref)
+                    variantCache[v.url] ?: VideoDl.variants(v.url, ua, ref).also { variantCache[v.url] = it }
                 } catch (e: Exception) {
                     listOf(VideoDl.Variant(v.label.ifEmpty { "Stream" }, v.url, 0))
                 }
@@ -2650,8 +2735,8 @@ class MainActivity : AppCompatActivity() {
         }
         // look inside every stream: drop audio-only / broken ones, join separate audio to video-only ones
         val hlsRows = kept.flatMap { it.rows }.filter { it.hls }.take(14)
-        if (hlsRows.isNotEmpty()) {
-            val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+        if (inspect && hlsRows.isNotEmpty()) {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
             try {
                 val tasks = hlsRows.map { r ->
                     java.util.concurrent.Callable<Unit> {
@@ -2665,7 +2750,7 @@ class MainActivity : AppCompatActivity() {
                         Unit
                     }
                 }
-                pool.invokeAll(tasks, 20, java.util.concurrent.TimeUnit.SECONDS)
+                pool.invokeAll(tasks, 10, java.util.concurrent.TimeUnit.SECONDS)
             } finally {
                 pool.shutdownNow()
             }
@@ -2975,37 +3060,48 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // --- qualities
+        // --- qualities: show the list at once, then refine it after looking inside the streams
+        fun render(groups: List<VGroup>) {
+            list.removeAllViews()
+            if (groups.isEmpty()) {
+                list.addView(loading)
+                loading.text = "No downloadable video found on this page"
+                return
+            }
+            val playing = t.playing.toSet()
+            val current = groups.firstOrNull { g -> g.keys.any { playing.contains(it) } }
+                ?: groups.maxByOrNull { it.seen }!!
+            var n = 0
+            for (r in current.rows) {
+                n++
+                makeRow(sheet, list, r, n, ua, ref, title, thumb)
+            }
+            val others = groups.filter { it !== current }.sortedByDescending { it.seen }
+            if (others.isNotEmpty()) {
+                val m = LinearLayout(this)
+                m.orientation = LinearLayout.HORIZONTAL
+                m.gravity = Gravity.CENTER_VERTICAL
+                m.setPadding(dp(20), 0, dp(12), 0)
+                val mt = tv("Master", 19f)
+                val mc = tv("   " + others.size + " other video" + (if (others.size > 1) "s" else ""), 13f, 0xFF999999.toInt())
+                m.addView(mt)
+                m.addView(mc, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                m.addView(iconView(R.drawable.ic_arrow_forward, 24))
+                m.setOnClickListener { masterSheet(others, ua, ref, title) }
+                list.addView(m, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+            }
+        }
         Thread {
-            val groups = buildGroups(t, ua, ref)
-            runOnUiThread {
-                list.removeView(loading)
-                if (groups.isEmpty()) {
-                    list.addView(loading)
-                    loading.text = "No downloadable video found on this page"
-                    return@runOnUiThread
-                }
-                val playing = t.playing.toSet()
-                val current = groups.firstOrNull { g -> g.keys.any { playing.contains(it) } }
-                    ?: groups.maxByOrNull { it.seen }!!
-                var n = 0
-                for (r in current.rows) {
-                    n++
-                    makeRow(sheet, list, r, n, ua, ref, title, thumb)
-                }
-                val others = groups.filter { it !== current }.sortedByDescending { it.seen }
-                if (others.isNotEmpty()) {
-                    val m = LinearLayout(this)
-                    m.orientation = LinearLayout.HORIZONTAL
-                    m.gravity = Gravity.CENTER_VERTICAL
-                    m.setPadding(dp(20), 0, dp(12), 0)
-                    val mt = tv("Master", 19f)
-                    val mc = tv("   " + others.size + " other video" + (if (others.size > 1) "s" else ""), 13f, 0xFF999999.toInt())
-                    m.addView(mt)
-                    m.addView(mc, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                    m.addView(iconView(R.drawable.ic_arrow_forward, 24))
-                    m.setOnClickListener { masterSheet(others, ua, ref, title) }
-                    list.addView(m, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+            val quick = try { buildGroups(t, ua, ref, false) } catch (_: Exception) { emptyList() }
+            if (quick.isNotEmpty()) runOnUiThread { if (sheet.isShowing) render(quick) }
+            val full = try { buildGroups(t, ua, ref, true) } catch (_: Exception) { null }
+            if (full != null) {
+                runOnUiThread {
+                    if (!sheet.isShowing) return@runOnUiThread
+                    // only redraw when the checked result really differs (avoids the list jumping)
+                    val a1 = quick.flatMap { g -> g.rows.map { it.url + it.label } }
+                    val a2 = full.flatMap { g -> g.rows.map { it.url + it.label } }
+                    if (a1 != a2) render(full)
                 }
             }
         }.start()
@@ -3238,40 +3334,103 @@ class MainActivity : AppCompatActivity() {
     private fun adBlockDialog() {
         val t = cur
         val host = if (t != null && !t.isHome && t.url.startsWith("http")) normHost(hostOf(t.url)) else null
-        val labels = mutableListOf<String>()
-        val acts = mutableListOf<() -> Unit>()
+        val (sheet, box) = sheetBox()
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(16), dp(20), dp(16), dp(24))
 
-        labels.add(if (adblockOn) "Turn ad blocker OFF" else "Turn ad blocker ON")
-        acts.add {
-            adblockOn = !adblockOn
-            store.setBool("adblock", adblockOn)
-            toast(if (adblockOn) "Ad blocker on" else "Ad blocker off")
+        fun stateText(on: Boolean) = if (on) "Protection is ON" else "Protection is OFF"
+        val head = uiHeader(
+            R.drawable.ic_shield, if (adblockOn) UiColors.GREEN else UiColors.GREY, "Ad blocker",
+            stateText(adblockOn), adblockOn
+        ) { on ->
+            adblockOn = on
+            store.setBool("adblock", on)
+            toast(if (on) "Ad blocker on" else "Ad blocker off")
         }
-        labels.add("Hide an element on this page")
-        acts.add { startPicker() }
+        // the switch lives inside the header; recolour the header when it flips
+        val sw = head.view.getChildAt(head.view.childCount - 1) as androidx.appcompat.widget.SwitchCompat
+        sw.setOnCheckedChangeListener { _, on ->
+            adblockOn = on
+            store.setBool("adblock", on)
+            head.setState(if (on) UiColors.GREEN else UiColors.GREY, stateText(on))
+            toast(if (on) "Ad blocker on" else "Ad blocker off")
+        }
+        body.addView(head.view)
+
+        val here = t?.blocked ?: 0
+        val total = store.getBlockedTotal() + pendingBlocked.get()
+        val (stats, _) = uiStats(
+            listOf(
+                here.toString() to "Blocked here",
+                total.toString() to "Blocked total",
+                AdLists.count.toString() to "List domains"
+            ),
+            UiColors.GREEN
+        )
+        body.addView(stats)
+
+        body.addView(uiLabel("This page"))
+        body.addView(uiRow(R.drawable.ic_pick, "Hide an element", "Tap any ad or box on the page to remove it", UiColors.ACCENT) {
+            sheet.dismiss()
+            startPicker()
+        })
         if (host != null) {
             val allowed = adAllow.contains(host)
-            labels.add(if (allowed) "Block ads on $host again" else "Allow ads on $host")
-            acts.add {
-                if (allowed) store.removeString("adallow", host) else store.addString("adallow", host)
-                adAllow = store.strings("adallow").toHashSet()
-                t?.webView?.reload()
-            }
+            body.addView(
+                uiRow(
+                    R.drawable.ic_block, "Allow ads on $host", "Turn blocking off only for this site", UiColors.RED,
+                    trailing = uiSwitch(allowed, UiColors.RED) { v ->
+                        if (v) store.addString("adallow", host) else store.removeString("adallow", host)
+                        adAllow = store.strings("adallow").toHashSet()
+                        t?.webView?.reload()
+                    }
+                )
+            )
         }
-        labels.add("Update ad lists (" + AdLists.count + " extra domains)")
-        acts.add { updateAdLists() }
-        labels.add("Hidden elements (" + store.strings("hide").size + ")")
-        acts.add { openList("hide") }
-        labels.add("Blocked domains (" + store.strings("addom").size + ")")
-        acts.add { openList("addomains") }
-        val here = t?.blocked ?: 0
-        labels.add("Blocked here: $here  •  total " + (store.getBlockedTotal() + pendingBlocked.get()))
-        acts.add { }
 
-        AlertDialog.Builder(this)
-            .setTitle("Ad blocker")
-            .setItems(labels.toTypedArray()) { _, w -> acts[w]() }
-            .show()
+        body.addView(uiLabel("Stronger blocking"))
+        val adguard = "https://dns.adguard-dns.com/resolve"
+        body.addView(
+            uiRow(
+                R.drawable.ic_dns, "DNS ad filter", "Blocks ad servers before they load (AdGuard DNS)", UiColors.ACCENT,
+                trailing = uiSwitch(Doh.endpoint == adguard, UiColors.ACCENT) { v ->
+                    val u = if (v) adguard else ""
+                    store.setStr("dns_url", u)
+                    Doh.endpoint = u
+                    Doh.clear()
+                    toast(if (v) "DNS ad filter on" else "DNS ad filter off")
+                }
+            )
+        )
+        body.addView(uiRow(R.drawable.ic_refresh, "Update ad lists", AdLists.count.toString() + " extra domains", UiColors.ACCENT) {
+            sheet.dismiss()
+            updateAdLists()
+        })
+
+        body.addView(uiLabel("Your rules"))
+        body.addView(
+            uiRow(R.drawable.ic_pick, "Hidden elements", store.strings("hide").size.toString() + " rules", UiColors.ACCENT,
+                trailing = uiChevron()) {
+                sheet.dismiss()
+                openList("hide")
+            }
+        )
+        body.addView(
+            uiRow(R.drawable.ic_block, "Blocked domains", store.strings("addom").size.toString() + " domains you added", UiColors.ACCENT,
+                trailing = uiChevron()) {
+                sheet.dismiss()
+                openList("addomains")
+            }
+        )
+
+        val sv = ScrollView(this)
+        sv.addView(body)
+        box.addView(
+            sv,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+        showSheet(sheet, box)
     }
 
     private fun startPicker() {
@@ -3375,6 +3534,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startVpn(mode: Int) {
         store.setInt("vpn_mode", mode)
+        store.setInt("vpn_last", mode)
         if (mode == 2 && VpnProxy.normalize(store.getStr("vpn_custom", "")).isEmpty()) {
             toast("Set your proxy in Settings first")
             openSettings()
@@ -3390,50 +3550,88 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun vpnDone(msg: String) {
+        runOnUiThread {
+            toast(msg)
+            val c = cur
+            if (c != null && !c.isHome) c.webView.reload()
+        }
+    }
+
     private fun vpnDialog() {
         val mode = store.getInt("vpn_mode", 0)
-        val labels = mutableListOf<String>()
-        val acts = mutableListOf<() -> Unit>()
-        if (mode != 0) {
-            labels.add("Turn VPN off")
-            acts.add {
+        val connected = VpnProxy.active.isNotEmpty()
+        val (sheet, box) = sheetBox()
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(16), dp(20), dp(16), dp(24))
+
+        val sub = when {
+            VpnProxy.finding -> "Looking for a server..."
+            connected -> "Connected  •  " + VpnProxy.active.substringAfter("://")
+            mode != 0 -> "Not connected yet"
+            else -> "Not connected"
+        }
+        val color = if (connected) UiColors.GREEN else if (VpnProxy.finding) UiColors.ACCENT else UiColors.GREY
+        val head = uiHeader(R.drawable.ic_lock, color, "VPN", sub, mode != 0) { _ -> }
+        val sw = head.view.getChildAt(head.view.childCount - 1) as androidx.appcompat.widget.SwitchCompat
+        sw.setOnCheckedChangeListener { _, on ->
+            sheet.dismiss()
+            if (on) {
+                val custom = VpnProxy.normalize(store.getStr("vpn_custom", "")).isNotEmpty()
+                val last = store.getInt("vpn_last", if (custom) 2 else 1)
+                if (last == 2) startVpn(2) else vpnWarn(store) { startVpn(1) }
+            } else {
                 store.setInt("vpn_mode", 0)
-                VpnProxy.apply(applicationContext, store) { msg ->
-                    runOnUiThread {
-                        toast(msg)
-                        val c = cur
-                        if (c != null && !c.isHome) c.webView.reload()
-                    }
-                }
+                VpnProxy.apply(applicationContext, store) { msg -> vpnDone(msg) }
             }
         }
-        if (mode != 1) {
-            labels.add("Turn on - free servers")
-            acts.add { vpnWarn(store) { startVpn(1) } }
-        } else {
-            labels.add("Find a new free server")
-            acts.add {
+        body.addView(head.view)
+
+        body.addView(uiLabel("Choose a server"))
+        body.addView(
+            uiRow(
+                R.drawable.ic_lock, "Free servers", "Found and tested automatically. Slower, run by strangers.",
+                UiColors.ACCENT, selected = mode == 1, trailing = if (mode == 1) uiChevron() else null
+            ) {
+                sheet.dismiss()
+                if (mode == 1) {
+                    toast("Looking for a free server - up to 45 seconds...")
+                    VpnProxy.findFree(store) { msg -> vpnDone(msg) }
+                } else vpnWarn(store) { startVpn(1) }
+            }
+        )
+        val custom = VpnProxy.normalize(store.getStr("vpn_custom", ""))
+        body.addView(
+            uiRow(
+                R.drawable.ic_link, "My own proxy",
+                if (custom.isEmpty()) "Not set - tap to add your proxy" else custom.substringAfter("://"),
+                UiColors.ACCENT, selected = mode == 2
+            ) {
+                sheet.dismiss()
+                startVpn(2)
+            }
+        )
+
+        if (mode == 1) {
+            body.addView(uiLabel("Actions"))
+            body.addView(uiRow(R.drawable.ic_refresh, "Find a new free server", "Use this if pages are slow or fail", UiColors.GREEN) {
+                sheet.dismiss()
                 toast("Looking for a free server - up to 45 seconds...")
-                VpnProxy.findFree(store) { msg ->
-                    runOnUiThread {
-                        toast(msg)
-                        val c = cur
-                        if (c != null && !c.isHome && VpnProxy.active.isNotEmpty()) c.webView.reload()
-                    }
-                }
-            }
+                VpnProxy.findFree(store) { msg -> vpnDone(msg) }
+            })
         }
-        if (mode != 2) {
-            labels.add("Turn on - my own proxy")
-            acts.add { startVpn(2) }
-        }
-        labels.add("VPN settings")
-        acts.add { openSettings() }
-        val status = if (VpnProxy.active.isEmpty()) "not connected" else "via " + VpnProxy.active.substringAfter("://")
-        AlertDialog.Builder(this)
-            .setTitle("VPN - $status")
-            .setItems(labels.toTypedArray()) { _, w -> acts[w]() }
-            .show()
+        body.addView(uiLabel("More"))
+        body.addView(uiRow(R.drawable.ic_settings, "VPN settings", null, UiColors.ACCENT, trailing = uiChevron()) {
+            sheet.dismiss()
+            openSettings()
+        })
+        body.addView(uiNote("This VPN covers pages opened inside Aura only - not other apps. Free servers can see which sites you open."))
+
+        val sv = ScrollView(this)
+        sv.addView(body)
+        box.addView(sv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        showSheet(sheet, box)
     }
 
     private fun updateAdLists() {
