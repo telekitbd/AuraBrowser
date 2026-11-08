@@ -2957,12 +2957,6 @@ class MainActivity : AppCompatActivity() {
         } else if (r.hls && r.live) {
             sub.text = "LIVE - saves what is available now"
             sub.visibility = View.VISIBLE
-        } else if (r.hls) {
-            val i = r.info
-            if (i != null && i.ok && i.hasVideo && (i.hasAudio || r.audio != null)) {
-                sub.text = "\uD83D\uDD0A With sound"
-                sub.visibility = View.VISIBLE
-            }
         }
         r.thumb?.let { b ->
             thumb.setImageBitmap(b)
@@ -3009,13 +3003,8 @@ class MainActivity : AppCompatActivity() {
                         return@runOnUiThread
                     }
                     if (p.w > 0 && p.h > 0) lab.text = p.w.toString() + "x" + p.h
-                    val snd = when (p.hasAudio) {
-                        true -> "\uD83D\uDD0A "
-                        false -> "\uD83D\uDD07 No sound  "
-                        else -> ""
-                    }
-                    if (p.size > 0 || snd.isNotEmpty()) {
-                        sub.text = snd + (if (p.size > 0) Formatter.formatShortFileSize(this, p.size) else "")
+                    if (p.size > 0) {
+                        sub.text = Formatter.formatShortFileSize(this, p.size)
                         sub.visibility = View.VISIBLE
                     }
                 }

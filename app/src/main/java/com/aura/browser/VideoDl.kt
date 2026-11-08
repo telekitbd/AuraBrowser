@@ -163,6 +163,22 @@ object VideoDl {
             } catch (_: Exception) {
             }
         }
+        if (aud == true) {
+            val ex = MediaExtractor()
+            try {
+                val hd = HashMap<String, String>()
+                hd["User-Agent"] = ua
+                if (referer.startsWith("http")) hd["Referer"] = referer
+                ex.setDataSource(url, hd)
+                if (audible(ex) == false) aud = false
+            } catch (_: Throwable) {
+            } finally {
+                try {
+                    ex.release()
+                } catch (_: Throwable) {
+                }
+            }
+        }
         return Probe(size, w, h, type, aud)
     }
 
@@ -209,6 +225,108 @@ object VideoDl {
                 tick()
                 n++
                 if (maxSegs > 0 && n >= maxSegs) break
+            }
+        }
+    }
+
+    /**
+     * Decodes a few seconds of the first audio track and measures the loudness.
+     * true = real sound, false = no audio track or the track is silent, null = could not tell
+     * (then the video is kept, never hidden by mistake).
+     */
+    fun audible(ex: MediaExtractor, maxFrames: Int = 150): Boolean? {
+        var codec: MediaCodec? = null
+        try {
+            var at = -1
+            for (i in 0 until ex.trackCount) {
+                if ((ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: "").startsWith("audio/")) {
+                    at = i
+                    break
+                }
+            }
+            if (at < 0) return false
+            val fmt = ex.getTrackFormat(at)
+            val mime = fmt.getString(MediaFormat.KEY_MIME) ?: return null
+            ex.selectTrack(at)
+            val dur = if (fmt.containsKey(MediaFormat.KEY_DURATION)) fmt.getLong(MediaFormat.KEY_DURATION) else 0L
+            // long files: listen at the start, at 40% and at 75% so a quiet intro is not mistaken for silence
+            val starts = if (dur > 20_000_000L) listOf(0L, dur * 4 / 10, dur * 3 / 4) else listOf(0L)
+            val frames = if (starts.size > 1) maxFrames else maxFrames * 3
+            val c = MediaCodec.createDecoderByType(mime)
+            codec = c
+            c.configure(fmt, null, null, 0)
+            c.start()
+            val bi = MediaCodec.BufferInfo()
+            for (s in starts) {
+                ex.seekTo(s, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                c.flush()
+                var fed = 0
+                var inDone = false
+                var outDone = false
+                var guard = 0
+                while (!outDone && guard++ < 4000) {
+                    if (!inDone) {
+                        val ii = c.dequeueInputBuffer(5000)
+                        if (ii >= 0) {
+                            val b = c.getInputBuffer(ii)!!
+                            val n = ex.readSampleData(b, 0)
+                            if (n < 0 || fed >= frames) {
+                                c.queueInputBuffer(ii, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inDone = true
+                            } else {
+                                c.queueInputBuffer(ii, 0, n, ex.sampleTime, 0)
+                                ex.advance()
+                                fed++
+                            }
+                        }
+                    }
+                    val oi = c.dequeueOutputBuffer(bi, 5000)
+                    if (oi >= 0) {
+                        val ob = c.getOutputBuffer(oi)
+                        var loud = false
+                        if (ob != null && bi.size > 0) {
+                            ob.position(bi.offset)
+                            ob.limit(bi.offset + bi.size)
+                            val sb = ob.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                            while (sb.hasRemaining()) {
+                                if (Math.abs(sb.get().toInt()) >= 100) {
+                                    loud = true
+                                    break
+                                }
+                            }
+                        }
+                        c.releaseOutputBuffer(oi, false)
+                        if (loud) return true
+                        if (bi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outDone = true
+                    }
+                }
+            }
+            return false
+        } catch (_: Throwable) {
+            return null
+        } finally {
+            try {
+                codec?.stop()
+            } catch (_: Throwable) {
+            }
+            try {
+                codec?.release()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun audibleFile(path: String, maxFrames: Int = 150): Boolean? {
+        val ex = MediaExtractor()
+        try {
+            ex.setDataSource(path)
+            return audible(ex, maxFrames)
+        } catch (_: Throwable) {
+            return null
+        } finally {
+            try {
+                ex.release()
+            } catch (_: Throwable) {
             }
         }
     }
@@ -329,6 +447,7 @@ object VideoDl {
                         if (fmt.containsKey(MediaFormat.KEY_HEIGHT)) h = fmt.getInteger(MediaFormat.KEY_HEIGHT)
                     } else if (m.startsWith("audio/")) a = true
                 }
+                if (a && audibleFile(f.absolutePath, 150) == false) a = false
                 var th: Bitmap? = null
                 if (v) {
                     try {
@@ -514,7 +633,11 @@ object VideoDl {
                     af = files.filter { (k, f) -> k != vk && hasA[k] == true && hasV[k] != true && f.length() > 0 }.entries
                         .sortedByDescending { it.value.length() }.firstOrNull()?.value
                 }
-                val withAudio = hasA[vk] == true || af != null
+                var withAudio = hasA[vk] == true || af != null
+                if (withAudio) {
+                    val heard = audibleFile((af ?: vf).absolutePath)
+                    if (heard == false) withAudio = false
+                }
                 if (skipSilent && !withAudio) {
                     msg("This video has no sound - not saved (turn off \"Hide silent videos\" in Settings to save it)")
                     return@Thread
