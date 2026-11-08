@@ -142,6 +142,9 @@ class SettingsActivity : AppCompatActivity() {
             startActivity(Intent(this, ScriptsActivity::class.java))
         }
 
+        section("Video download")
+        toggleRow("Hide silent videos", "Only list videos that have sound when downloading", "hidesilent", true)
+
         section("Safety")
         toggleRow("HTTPS-only mode", "Upgrade http:// links to https://", "httpsonly", false)
         row("Safe Browsing", "Always off", null) { toast("Safe Browsing is always off") }

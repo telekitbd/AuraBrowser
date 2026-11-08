@@ -2802,6 +2802,13 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             for (g in kept) g.rows.removeAll { rr -> val i = rr.info; i != null && i.ok && !i.hasVideo && !i.enc }
+            // silent videos: video track but no audio inside and no separate audio stream found
+            if (store.getBool("hidesilent", true)) {
+                for (g in kept) g.rows.removeAll { rr ->
+                    val i = rr.info
+                    i != null && i.ok && !i.enc && i.hasVideo && !i.hasAudio && rr.audio == null
+                }
+            }
         }
         for (g in kept) g.rows.sortByDescending { qh(it.label) }
         return kept.filter { it.rows.isNotEmpty() }
@@ -2950,6 +2957,12 @@ class MainActivity : AppCompatActivity() {
         } else if (r.hls && r.live) {
             sub.text = "LIVE - saves what is available now"
             sub.visibility = View.VISIBLE
+        } else if (r.hls) {
+            val i = r.info
+            if (i != null && i.ok && i.hasVideo && (i.hasAudio || r.audio != null)) {
+                sub.text = "\uD83D\uDD0A With sound"
+                sub.visibility = View.VISIBLE
+            }
         }
         r.thumb?.let { b ->
             thumb.setImageBitmap(b)
@@ -2989,9 +3002,20 @@ class MainActivity : AppCompatActivity() {
                         line.visibility = View.GONE
                         return@runOnUiThread
                     }
+                    // no sound at all: hide it (can be turned off in Settings)
+                    if (p.hasAudio == false && store.getBool("hidesilent", true)) {
+                        row.visibility = View.GONE
+                        line.visibility = View.GONE
+                        return@runOnUiThread
+                    }
                     if (p.w > 0 && p.h > 0) lab.text = p.w.toString() + "x" + p.h
-                    if (p.size > 0) {
-                        sub.text = Formatter.formatShortFileSize(this, p.size)
+                    val snd = when (p.hasAudio) {
+                        true -> "\uD83D\uDD0A "
+                        false -> "\uD83D\uDD07 No sound  "
+                        else -> ""
+                    }
+                    if (p.size > 0 || snd.isNotEmpty()) {
+                        sub.text = snd + (if (p.size > 0) Formatter.formatShortFileSize(this, p.size) else "")
                         sub.visibility = View.VISIBLE
                     }
                 }
@@ -3557,7 +3581,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun mseAll(tk: String, n: Int) {
             val job = mseJobs.remove(tk) ?: return
-            VideoDl.saveMse(applicationContext, store, job.files, job.mimes, job.base, job.ref) { m ->
+            VideoDl.saveMse(applicationContext, store, job.files, job.mimes, job.base, job.ref, store.getBool("hidesilent", true)) { m ->
                 runOnUiThread { toast(m) }
             }
         }

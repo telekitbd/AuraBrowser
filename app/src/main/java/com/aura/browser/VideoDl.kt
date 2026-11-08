@@ -37,7 +37,7 @@ object VideoDl {
 
     class Variant(val label: String, val url: String, val height: Int, val audio: String? = null)
 
-    class Probe(val size: Long, val w: Int, val h: Int, val type: String = "")
+    class Probe(val size: Long, val w: Int, val h: Int, val type: String = "", val hasAudio: Boolean? = null)
 
     /** What is really inside a stream (checked on its first segment). */
     class Info(
@@ -145,6 +145,7 @@ object VideoDl {
         }
         var w = 0
         var h = 0
+        var aud: Boolean? = null
         val r = MediaMetadataRetriever()
         try {
             val hd = HashMap<String, String>()
@@ -153,6 +154,8 @@ object VideoDl {
             r.setDataSource(url, hd)
             w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
             h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            // "yes" only when the file really has an audio track; null when the file could not be opened
+            aud = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"
         } catch (_: Exception) {
         } finally {
             try {
@@ -160,7 +163,7 @@ object VideoDl {
             } catch (_: Exception) {
             }
         }
-        return Probe(size, w, h, type)
+        return Probe(size, w, h, type, aud)
     }
 
     fun parsePlaylist(url: String, ua: String, referer: String): Pl {
@@ -469,7 +472,7 @@ object VideoDl {
     /** Saves the pieces copied from a MediaSource player (video and maybe separate audio) as one MP4. */
     fun saveMse(
         ctx: Context, store: Store, files: Map<Int, File>, mimes: Map<Int, String>,
-        baseName: String, url: String, msg: (String) -> Unit
+        baseName: String, url: String, skipSilent: Boolean = false, msg: (String) -> Unit
     ) {
         Thread {
             val id = -System.currentTimeMillis()
@@ -512,6 +515,10 @@ object VideoDl {
                         .sortedByDescending { it.value.length() }.firstOrNull()?.value
                 }
                 val withAudio = hasA[vk] == true || af != null
+                if (skipSilent && !withAudio) {
+                    msg("This video has no sound - not saved (turn off \"Hide silent videos\" in Settings to save it)")
+                    return@Thread
+                }
                 val joined = try {
                     mux(vf, af, tmpO)
                 } catch (_: Exception) {
