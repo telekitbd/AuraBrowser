@@ -101,7 +101,7 @@ object UserScripts {
         return Regex(sb.toString(), RegexOption.IGNORE_CASE)
     }
 
-    /** Patterns: "*", "<all_urls>", "example.com" (with subdomains) or "*://*.example.com/*". */
+    // Patterns: a single star (all sites), <all_urls>, a plain domain (with subdomains) or a full match pattern.
     fun matches(url: String, patterns: String): Boolean {
         val host = hostOf(url).lowercase()
         for (raw in patterns.split('\n', ',', ' ', ';')) {
