@@ -2577,8 +2577,60 @@ class MainActivity : AppCompatActivity() {
         return kept
     }
 
+    /** Plays one quality in-app so it can be checked before downloading. */
+    private fun previewQuality(r: VRow, label: String, ua: String, ref: String, onDownload: () -> Unit) {
+        val dlg = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val root = FrameLayout(this)
+        root.setBackgroundColor(Color.BLACK)
+        val vv = android.widget.VideoView(this)
+        val mc = android.widget.MediaController(this)
+        mc.setAnchorView(vv)
+        vv.setMediaController(mc)
+        root.addView(vv, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+        val spin = ProgressBar(this)
+        root.addView(spin, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setBackgroundColor(0x99000000.toInt())
+        bar.setPadding(dp(8), dp(4), dp(8), dp(4))
+        val close = iconButton(R.drawable.ic_arrow_back, 48, 48)
+        close.setOnClickListener { dlg.dismiss() }
+        val name = tv(label.ifEmpty { "Preview" } + "  •  " + r.type, 16f)
+        val dl = iconButton(R.drawable.ic_download, 48, 48)
+        dl.setOnClickListener {
+            dlg.dismiss()
+            onDownload()
+        }
+        bar.addView(close)
+        bar.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
+        bar.addView(dl)
+        root.addView(bar, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+        dlg.setContentView(root)
+        vv.setOnPreparedListener {
+            spin.visibility = View.GONE
+            it.start()
+        }
+        vv.setOnErrorListener { _, _, _ ->
+            spin.visibility = View.GONE
+            toast("Cannot preview this quality")
+            true
+        }
+        dlg.setOnDismissListener { try { vv.stopPlayback() } catch (_: Exception) {} }
+        try {
+            vv.setVideoURI(Uri.parse(r.url), hashMapOf("User-Agent" to ua, "Referer" to ref))
+        } catch (_: Exception) {
+            toast("Cannot preview this quality")
+            return
+        }
+        dlg.show()
+    }
+
     private fun makeRow(
-        sheet: BottomSheetDialog, list: LinearLayout, r: VRow, idx: Int, ua: String, ref: String, title: String
+        sheet: BottomSheetDialog, list: LinearLayout, r: VRow, idx: Int, ua: String, ref: String, title: String,
+        head: ImageView? = null
     ) {
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
@@ -2588,27 +2640,60 @@ class MainActivity : AppCompatActivity() {
         num.gravity = Gravity.CENTER
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
-        val lab = tv(r.label.ifEmpty { "Video" }, 19f)
+        val lab = tv(r.label.ifEmpty { "Video" }, 16f)
         val sub = tv("", 12f, 0xFF999999.toInt())
         sub.visibility = View.GONE
         col.addView(lab)
         col.addView(sub)
-        val typ = tv(r.type, 16f, 0xFFCCCCCC.toInt())
-        typ.setPadding(0, 0, dp(8), 0)
-        val info = iconButton(R.drawable.ic_info, 44, 52)
-        val play = iconButton(R.drawable.ic_play, 44, 52)
-        row.addView(num, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT))
-        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(16) })
+        val typ = tv(r.type, 12f, 0xFFCCCCCC.toInt())
+        typ.setPadding(0, 0, dp(4), 0)
+        val info = iconButton(R.drawable.ic_info, 36, 52)
+        val prev = iconButton(R.drawable.ic_play, 38, 52)
+        val dl = iconButton(R.drawable.ic_download, 38, 52)
+        val thumb = ImageView(this)
+        thumb.scaleType = ImageView.ScaleType.CENTER_CROP
+        val tbg = GradientDrawable()
+        tbg.cornerRadius = dp(6).toFloat()
+        tbg.setColor(0xFF000000.toInt())
+        thumb.background = tbg
+        thumb.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, dp(6).toFloat())
+            }
+        }
+        thumb.clipToOutline = true
+        row.addView(num, LinearLayout.LayoutParams(dp(28), ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(thumb, LinearLayout.LayoutParams(dp(64), dp(40)).apply { leftMargin = dp(6) })
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(12) })
         row.addView(typ)
         row.addView(info)
-        row.addView(play)
+        row.addView(prev)
+        row.addView(dl)
         val go = {
             sheet.dismiss()
             startVideoDownload(r.hls, r.url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref)
         }
-        row.setOnClickListener { go() }
-        play.setOnClickListener { go() }
+        val pv = { previewQuality(r, lab.text.toString(), ua, ref, go) }
+        // only the download button downloads; tapping the row or the play button previews
+        row.setOnClickListener { pv() }
+        thumb.setOnClickListener { pv() }
+        prev.setOnClickListener { pv() }
+        dl.setOnClickListener { go() }
         info.setOnClickListener { videoInfo(r.url) }
+        Thread {
+            try {
+                val mmr = android.media.MediaMetadataRetriever()
+                mmr.setDataSource(r.url, hashMapOf("User-Agent" to ua, "Referer" to ref))
+                val bmp = mmr.getFrameAtTime(1_000_000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: mmr.getFrameAtTime(0L)
+                mmr.release()
+                if (bmp != null) runOnUiThread {
+                    thumb.setImageBitmap(bmp)
+                    if (head != null && head.drawable == null) head.setImageBitmap(bmp)
+                }
+            } catch (_: Throwable) {
+            }
+        }.start()
         list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
         val line = View(this)
         line.setBackgroundColor(0xFF333333.toInt())
@@ -2742,7 +2827,7 @@ class MainActivity : AppCompatActivity() {
                 var n = 0
                 for (r in current.rows) {
                     n++
-                    makeRow(sheet, list, r, n, ua, ref, title)
+                    makeRow(sheet, list, r, n, ua, ref, title, thumb)
                 }
                 val others = groups.filter { it !== current }.sortedByDescending { it.seen }
                 if (others.isNotEmpty()) {
