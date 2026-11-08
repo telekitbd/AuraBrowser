@@ -287,11 +287,29 @@ object AdBlock {
     for(var i=0;i<recs.length;i++){if(recs[i].ms===ms&&recs[i].n>0){out.push(recs[i]);}}
     return out;
   }
+  function gather(t){
+    var l=list(t.ms),hasA=false,i,j,k;
+    for(i=0;i<l.length;i++){if(/^audio\//i.test(l[i].m)||/mp4a|opus|vorbis|ac-3|ec-3/i.test(l[i].m)){hasA=true;}}
+    if(!hasA){
+      var els=document.querySelectorAll('audio,video');
+      for(i=0;i<els.length;i++){
+        var e=els[i];
+        if(e===t.v||!e.currentSrc){continue;}
+        for(j=0;j<msList.length;j++){
+          if(msList[j]!==t.ms&&msList[j].__url&&msList[j].__url===e.currentSrc){
+            var x=list(msList[j]);
+            for(k=0;k<x.length;k++){if(/^audio\//i.test(x[k].m)){l.push(x[k]);}}
+          }
+        }
+      }
+    }
+    return l;
+  }
   window.__auraMseInfo=function(){
     try{
       var t=target();
       if(!t){return '';}
-      var l=list(t.ms),n=0,full=false;
+      var l=gather(t),n=0,full=false;
       for(var i=0;i<l.length;i++){n+=l[i].n;if(l[i].full){full=true;}}
       if(!n){return '';}
       var v=t.v;
@@ -301,7 +319,7 @@ object AdBlock {
   window.__auraMseSend=function(tk){
     try{
       var t=target();
-      var l=t?list(t.ms):[];
+      var l=t?gather(t):[];
       if(!l.length){AuraBridge.mseFail(tk);return;}
       var k=0,S=600*1024;
       function nextBuf(){

@@ -477,17 +477,43 @@ object VideoDl {
             var uri: Uri? = null
             try {
                 fun isAudio(m: String) = m.lowercase().startsWith("audio/")
-                val vids = files.filter { (k, f) -> !isAudio(mimes[k] ?: "") && f.length() > 0 }.values
-                    .sortedByDescending { it.length() }
-                val auds = files.filter { (k, f) -> isAudio(mimes[k] ?: "") && f.length() > 0 }.values
-                    .sortedByDescending { it.length() }
-                val vf = vids.firstOrNull()
-                if (vf == null) {
+                // look at what is really inside each captured file
+                val hasV = HashMap<Int, Boolean>()
+                val hasA = HashMap<Int, Boolean>()
+                for ((k, f) in files) {
+                    var v = false
+                    var a = false
+                    try {
+                        val ex = MediaExtractor()
+                        ex.setDataSource(f.absolutePath)
+                        for (i in 0 until ex.trackCount) {
+                            val m = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
+                            if (m.startsWith("video/")) v = true
+                            if (m.startsWith("audio/")) a = true
+                        }
+                        ex.release()
+                    } catch (_: Throwable) {
+                        v = !isAudio(mimes[k] ?: "")
+                        a = isAudio(mimes[k] ?: "")
+                    }
+                    hasV[k] = v
+                    hasA[k] = a
+                }
+                val vk = files.filter { (k, f) -> hasV[k] == true && f.length() > 0 }.entries
+                    .sortedByDescending { it.value.length() }.firstOrNull()?.key
+                if (vk == null) {
                     msg("No video data captured")
                     return@Thread
                 }
+                val vf = files[vk]!!
+                var af: File? = null
+                if (hasA[vk] != true) {
+                    af = files.filter { (k, f) -> k != vk && hasA[k] == true && hasV[k] != true && f.length() > 0 }.entries
+                        .sortedByDescending { it.value.length() }.firstOrNull()?.value
+                }
+                val withAudio = hasA[vk] == true || af != null
                 val joined = try {
-                    mux(vf, auds.firstOrNull(), tmpO)
+                    mux(vf, af, tmpO)
                 } catch (_: Exception) {
                     false
                 }
@@ -512,7 +538,13 @@ object VideoDl {
                 s.status = 1
                 states[id] = s
                 store.addDownload(id, name, url, target.toString())
-                msg("Saved: $name")
+                msg(
+                    "Saved: $name" + when {
+                        !joined -> "  (could not convert - video may be silent / not seekable)"
+                        !withAudio -> "  (no audio found on this page's player)"
+                        else -> ""
+                    }
+                )
             } catch (e: Exception) {
                 try {
                     uri?.let { ctx.contentResolver.delete(it, null, null) }
