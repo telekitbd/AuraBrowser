@@ -70,3 +70,12 @@ All 30 menu options are wired up:
 
 ## v2.5
 - Media button: tap opens the 3 buttons right below it (above it if the button is low); drag the button anywhere
+
+## v3.0 (inspired by Soul Browser)
+- **App lock**: PIN (4-8 digits) plus fingerprint / face unlock, locks again after 3 s / 1 min / 5 min / 15 min away from the app (Settings / App lock)
+- **Backup and restore**: save bookmarks, history, shortcuts, memos, scripts and all settings to one file and restore it later (Settings / Backup)
+- **User scripts**: your own JavaScript on the sites you choose (Tampermonkey-style, `@name` / `@match` read from a pasted script, import from a link, GM_addStyle / GM_getValue / GM_setValue / GM_log) (Settings / User scripts)
+- **Scroll buttons**: a floating arrow appears while you scroll and jumps to the top or the bottom of the page
+- **History limit**: do not save / 100 / 500 / 2000 pages
+- Newer video-download code that was sitting in a wrong folder (`src/` in the project root) is now part of the app, the stray folder was removed
+- Settings now shows the real app version

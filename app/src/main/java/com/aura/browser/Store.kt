@@ -107,10 +107,12 @@ class Store(ctx: Context) {
 
     fun addHistory(title: String, url: String) {
         if (!url.startsWith("http")) return
+        val max = getInt("histmax", 500)
+        if (max <= 0) return
         val l = getHistory()
         l.removeAll { it.url == url }
         l.add(0, Item(title.ifBlank { url }, url, System.currentTimeMillis()))
-        while (l.size > 500) l.removeAt(l.size - 1)
+        while (l.size > max) l.removeAt(l.size - 1)
         writeList("history", l)
     }
 
@@ -266,6 +268,65 @@ class Store(ctx: Context) {
     fun getInt(key: String, def: Int): Int = sp.getInt("s_$key", def)
     fun setInt(key: String, v: Int) {
         sp.edit().putInt("s_$key", v).apply()
+    }
+
+    // ---- raw json lists (user scripts ...) ----
+    fun getJson(key: String): String = sp.getString("j_$key", "[]") ?: "[]"
+
+    fun putJson(key: String, v: String) {
+        sp.edit().putString("j_$key", v).apply()
+    }
+
+    // ---- backup / restore (everything except PINs and the download list) ----
+    private fun skipInBackup(k: String): Boolean = k == "s_pin" || k == "s_lockpin" || k == "downloads"
+
+    fun exportAll(): String {
+        val data = JSONObject()
+        for ((k, v) in sp.all) {
+            if (skipInBackup(k)) continue
+            val o = JSONObject()
+            when (v) {
+                is Boolean -> o.put("t", "b").put("v", v)
+                is Int -> o.put("t", "i").put("v", v)
+                is Long -> o.put("t", "l").put("v", v)
+                is Float -> o.put("t", "f").put("v", v.toDouble())
+                is String -> o.put("t", "s").put("v", v)
+                else -> continue
+            }
+            data.put(k, o)
+        }
+        val root = JSONObject()
+        root.put("app", "AuraBrowser")
+        root.put("version", 1)
+        root.put("time", System.currentTimeMillis())
+        root.put("data", data)
+        return root.toString(2)
+    }
+
+    /** Returns how many entries were restored, or -1 when the text is not an Aura backup. */
+    fun importAll(text: String): Int {
+        val root = JSONObject(text)
+        if (root.optString("app") != "AuraBrowser") return -1
+        val data = root.optJSONObject("data") ?: return -1
+        val ed = sp.edit()
+        var n = 0
+        val keys = data.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            if (skipInBackup(k)) continue
+            val o = data.optJSONObject(k) ?: continue
+            when (o.optString("t")) {
+                "b" -> ed.putBoolean(k, o.optBoolean("v"))
+                "i" -> ed.putInt(k, o.optInt("v"))
+                "l" -> ed.putLong(k, o.optLong("v"))
+                "f" -> ed.putFloat(k, o.optDouble("v").toFloat())
+                "s" -> ed.putString(k, o.optString("v"))
+                else -> continue
+            }
+            n++
+        }
+        ed.apply()
+        return n
     }
 
     // ---- memos ----

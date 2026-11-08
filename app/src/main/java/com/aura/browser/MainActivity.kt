@@ -268,6 +268,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && customView != null) setBars(true)
+    }
+
     override fun onResume() {
         super.onResume()
         loadPrefs()
@@ -371,6 +376,7 @@ class MainActivity : AppCompatActivity() {
             tab.lastTouch = System.currentTimeMillis()
             false
         }
+        wv.setOnScrollChangeListener { _, _, y, _, oy -> onPageScroll(tab, y, oy) }
 
         wv.setDownloadListener { url, ua, cd, mime, _ -> startDownload(url, ua, cd, mime) }
 
@@ -483,6 +489,7 @@ class MainActivity : AppCompatActivity() {
                 if (store.getBool("dark", false)) view.evaluateJavascript(DARK_JS, null)
                 applyHide(tab)
                 injectAnti(tab)
+                UserScripts.run(view, tab.url, store)
                 if (tab === cur) updateUi()
             }
 
@@ -650,6 +657,8 @@ class MainActivity : AppCompatActivity() {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                     )
                 )
+                topBar.visibility = View.GONE
+                bottomBar.visibility = View.GONE
                 setBars(true)
                 requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 val lp = window.attributes
@@ -696,6 +705,8 @@ class MainActivity : AppCompatActivity() {
         customView = null
         customCb?.onCustomViewHidden()
         customCb = null
+        topBar.visibility = if (fullscreen) View.GONE else View.VISIBLE
+        bottomBar.visibility = if (fullscreen) View.GONE else View.VISIBLE
         setBars(fullscreen)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         val lp = window.attributes
@@ -715,7 +726,54 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(t.webView, !store.getBool("block3p", false))
     }
 
+    private var scrollBtn: ImageView? = null
+    private var scrollGoesUp = true
+    private val scrollHide = Runnable { scrollBtn?.visibility = View.GONE }
+
+    /** Floating arrow that jumps to the top (after scrolling up) or to the bottom (after scrolling down). */
+    private fun onPageScroll(tab: BTab, y: Int, oy: Int) {
+        if (tab !== cur || !store.getBool("scrollbtn", true)) return
+        val dy = y - oy
+        if (dy in -5..5) return
+        if (y < 300 && dy < 0) {
+            scrollBtn?.visibility = View.GONE
+            return
+        }
+        var b = scrollBtn
+        if (b == null) {
+            val f = ImageView(this)
+            val bg = GradientDrawable()
+            bg.shape = GradientDrawable.OVAL
+            bg.setColor(0xDD2A2A3A.toInt())
+            f.background = bg
+            f.setColorFilter(Color.WHITE)
+            f.setPadding(dp(10), dp(10), dp(10), dp(10))
+            f.elevation = dp(6).toFloat()
+            val lp = FrameLayout.LayoutParams(dp(42), dp(42))
+            lp.gravity = Gravity.BOTTOM or Gravity.START
+            lp.setMargins(dp(12), 0, 0, dp(16))
+            f.setOnClickListener {
+                val w = cur?.webView
+                if (w != null) {
+                    if (scrollGoesUp) w.pageUp(true) else w.pageDown(true)
+                }
+                f.visibility = View.GONE
+            }
+            f.visibility = View.GONE
+            content.addView(f, lp)
+            scrollBtn = f
+            b = f
+        }
+        scrollGoesUp = dy < 0
+        b.setImageResource(if (scrollGoesUp) R.drawable.ic_arrow_up else R.drawable.ic_arrow_down)
+        b.visibility = View.VISIBLE
+        b.bringToFront()
+        b.removeCallbacks(scrollHide)
+        b.postDelayed(scrollHide, 2500)
+    }
+
     private fun selectTab(t: BTab) {
+        scrollBtn?.visibility = View.GONE
         cur?.let { captureThumb(it) }
         cur = t
         showContent()
@@ -2212,7 +2270,15 @@ class MainActivity : AppCompatActivity() {
     private var videoFab: ImageView? = null
     private val hidePanel = Runnable { videoPanel?.visibility = View.GONE }
 
-    private class VRow(val label: String, val type: String, val url: String, val hls: Boolean)
+    private class VRow(var label: String, val type: String, val url: String, val hls: Boolean) {
+        var audio: String? = null
+        var info: VideoDl.Info? = null
+        var thumb: Bitmap? = null
+        var live = false
+        var enc = false
+    }
+
+    private val inspectCache = java.util.concurrent.ConcurrentHashMap<String, VideoDl.Info>()
 
     private class VGroup(val rows: MutableList<VRow>, val keys: MutableSet<String>, var seen: Long)
     private var customWrap: ViewGroup? = null
@@ -2367,11 +2433,11 @@ class MainActivity : AppCompatActivity() {
             fbg.shape = GradientDrawable.OVAL
             fbg.setColor(0xFF7C6FE0.toInt())
             fab.background = fbg
-            fab.setPadding(dp(12), dp(12), dp(12), dp(12))
-            fab.elevation = dp(8).toFloat()
-            val flp = FrameLayout.LayoutParams(dp(48), dp(48))
-            flp.gravity = Gravity.TOP or Gravity.END
-            flp.setMargins(0, dp(150), dp(10), 0)
+            fab.setPadding(dp(8), dp(8), dp(8), dp(8))
+            fab.elevation = dp(6).toFloat()
+            val flp = FrameLayout.LayoutParams(dp(34), dp(34))
+            flp.gravity = Gravity.BOTTOM or Gravity.END
+            flp.setMargins(0, 0, dp(8), dp(10))
             content.addView(fab, flp)
             // tap = open / close the panel, drag = move the button anywhere
             val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
@@ -2397,11 +2463,10 @@ class MainActivity : AppCompatActivity() {
                             videoPanel?.visibility = View.GONE
                         }
                         if (moved) {
-                            val minX = -(content.width - dp(48) - dp(10)).toFloat()
-                            val minY = -dp(150).toFloat()
-                            val maxY = (content.height - dp(150) - dp(48)).toFloat()
-                            v.translationX = (startTx + mx).coerceIn(minOf(minX, 0f), 0f)
-                            v.translationY = (startTy + my).coerceIn(minY, maxOf(minY, maxY))
+                            val minX = -(content.width - dp(34) - dp(8)).toFloat()
+                            val minY = -(content.height - dp(34) - dp(10)).toFloat()
+                            v.translationX = (startTx + mx).coerceIn(minOf(minX, 0f), dp(8).toFloat())
+                            v.translationY = (startTy + my).coerceIn(minOf(minY, 0f), dp(10).toFloat())
                         }
                     }
                     android.view.MotionEvent.ACTION_UP -> if (!moved) toggleVideoPanel()
@@ -2427,8 +2492,8 @@ class MainActivity : AppCompatActivity() {
             val lp = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            lp.gravity = Gravity.TOP or Gravity.END
-            lp.setMargins(0, dp(150) + dp(56), dp(2), 0)
+            lp.gravity = Gravity.BOTTOM or Gravity.END
+            lp.setMargins(0, 0, dp(2), dp(10) + dp(34) + dp(8))
             content.addView(p, lp)
             videoPanel = p
         }
@@ -2445,9 +2510,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val ph = if (p.height > 0) p.height else dp(70)
-        val below = fab.translationY + dp(150) + dp(48) + ph + dp(16) < content.height
+        // the button sits low by default, so the panel opens above it; below it when the button was dragged to the top
+        val fabTop = content.height - dp(10) - dp(34) + fab.translationY
+        val above = fabTop >= ph + dp(8)
         p.translationX = fab.translationX
-        p.translationY = if (below) fab.translationY else fab.translationY - dp(56) - ph - dp(8)
+        p.translationY = if (above) fab.translationY else fab.translationY + dp(34) + dp(16) + ph
         p.visibility = View.VISIBLE
         p.bringToFront()
         p.removeCallbacks(hidePanel)
@@ -2537,6 +2604,12 @@ class MainActivity : AppCompatActivity() {
             else rest.add(v)
         }
         if (direct.isNotEmpty()) {
+            val hosts = direct.map { hostOf(it.url) }.toSet()
+            val same = rest.filter { !it.url.lowercase().contains(".m3u8") && hosts.contains(hostOf(it.url)) }
+            for (v in same) {
+                direct.add(v)
+                rest.remove(v)
+            }
             val g = VGroup(mutableListOf(), mutableSetOf(), 0L)
             for (v in direct) {
                 g.rows.add(VRow(v.label, extOf(v.url), v.url, false))
@@ -2554,7 +2627,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 val g = VGroup(mutableListOf(), mutableSetOf(v.url), v.time)
                 for (x in vs) {
-                    g.rows.add(VRow(x.label, "HLS", x.url, true))
+                    val nr = VRow(x.label, "HLS", x.url, true)
+                    nr.audio = x.audio
+                    g.rows.add(nr)
                     g.keys.add(x.url)
                 }
                 out.add(g)
@@ -2573,12 +2648,133 @@ class MainActivity : AppCompatActivity() {
                 } else true
             } else true
         }
+        // look inside every stream: drop audio-only / broken ones, join separate audio to video-only ones
+        val hlsRows = kept.flatMap { it.rows }.filter { it.hls }.take(14)
+        if (hlsRows.isNotEmpty()) {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+            try {
+                val tasks = hlsRows.map { r ->
+                    java.util.concurrent.Callable<Unit> {
+                        val c = inspectCache[r.url]
+                        if (c != null) r.info = c
+                        else {
+                            val i = VideoDl.inspectHls(applicationContext, r.url, ua, ref)
+                            if (i.ok) inspectCache[r.url] = i
+                            r.info = i
+                        }
+                        Unit
+                    }
+                }
+                pool.invokeAll(tasks, 20, java.util.concurrent.TimeUnit.SECONDS)
+            } finally {
+                pool.shutdownNow()
+            }
+            val audios = hlsRows.filter { val i = it.info; i != null && i.ok && !i.hasVideo && i.hasAudio }
+            for (r in hlsRows) {
+                val i = r.info ?: continue
+                if (!i.ok) continue
+                r.live = i.live
+                r.enc = i.enc
+                r.thumb = i.thumb
+                if (i.hasVideo) {
+                    if (i.w > 0 && i.h > 0) r.label = i.w.toString() + "x" + i.h
+                    if (!i.hasAudio && r.audio == null) r.audio = bestAudio(r.url, audios)
+                }
+            }
+            for (g in kept) g.rows.removeAll { rr -> val i = rr.info; i != null && i.ok && !i.hasVideo && !i.enc }
+        }
         for (g in kept) g.rows.sortByDescending { qh(it.label) }
-        return kept
+        return kept.filter { it.rows.isNotEmpty() }
+    }
+
+    private fun bestAudio(url: String, audios: List<VRow>): String? {
+        val h = hostOf(url)
+        var best: VRow? = null
+        var bl = -1
+        for (a in audios) {
+            if (hostOf(a.url) != h) continue
+            var n = 0
+            val m = minOf(url.length, a.url.length)
+            while (n < m && url[n] == a.url[n]) n++
+            if (n > bl) {
+                bl = n
+                best = a
+            }
+        }
+        return best?.url
+    }
+
+    /** Plays one quality in-app so it can be checked before downloading. */
+    private fun previewQuality(r: VRow, label: String, ua: String, ref: String, onDownload: () -> Unit) {
+        val dlg = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val root = FrameLayout(this)
+        root.setBackgroundColor(Color.BLACK)
+        val vv = android.widget.VideoView(this)
+        val mc = android.widget.MediaController(this)
+        mc.setAnchorView(vv)
+        vv.setMediaController(mc)
+        root.addView(vv, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+        val spin = ProgressBar(this)
+        root.addView(spin, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setBackgroundColor(0x99000000.toInt())
+        bar.setPadding(dp(8), dp(4), dp(8), dp(4))
+        val close = iconButton(R.drawable.ic_arrow_back, 48, 48)
+        close.setOnClickListener { dlg.dismiss() }
+        val name = tv(label.ifEmpty { "Preview" } + "  •  " + r.type, 16f)
+        val dl = iconButton(R.drawable.ic_download, 48, 48)
+        dl.setOnClickListener {
+            dlg.dismiss()
+            onDownload()
+        }
+        bar.addView(close)
+        bar.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
+        bar.addView(dl)
+        root.addView(bar, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+        dlg.setContentView(root)
+        vv.setOnPreparedListener {
+            spin.visibility = View.GONE
+            it.start()
+        }
+        vv.setOnErrorListener { _, _, _ ->
+            spin.visibility = View.GONE
+            toast("Cannot preview this quality")
+            true
+        }
+        dlg.setOnDismissListener { try { vv.stopPlayback() } catch (_: Exception) {} }
+        if (r.hls) {
+            // plays the first seconds of exactly what would be saved (video + audio joined)
+            dlg.show()
+            Thread {
+                val f = VideoDl.makePreview(applicationContext, r.url, r.audio, ua, ref)
+                runOnUiThread {
+                    if (!dlg.isShowing) return@runOnUiThread
+                    if (f == null) {
+                        spin.visibility = View.GONE
+                        toast("Cannot preview this quality")
+                    } else {
+                        vv.setVideoPath(f.absolutePath)
+                    }
+                }
+            }.start()
+            return
+        }
+        try {
+            vv.setVideoURI(Uri.parse(r.url), hashMapOf("User-Agent" to ua, "Referer" to ref))
+        } catch (_: Exception) {
+            toast("Cannot preview this quality")
+            return
+        }
+        dlg.show()
     }
 
     private fun makeRow(
-        sheet: BottomSheetDialog, list: LinearLayout, r: VRow, idx: Int, ua: String, ref: String, title: String
+        sheet: BottomSheetDialog, list: LinearLayout, r: VRow, idx: Int, ua: String, ref: String, title: String,
+        head: ImageView? = null
     ) {
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
@@ -2588,27 +2784,72 @@ class MainActivity : AppCompatActivity() {
         num.gravity = Gravity.CENTER
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
-        val lab = tv(r.label.ifEmpty { "Video" }, 19f)
+        val lab = tv(r.label.ifEmpty { "Video" }, 16f)
         val sub = tv("", 12f, 0xFF999999.toInt())
         sub.visibility = View.GONE
         col.addView(lab)
         col.addView(sub)
-        val typ = tv(r.type, 16f, 0xFFCCCCCC.toInt())
-        typ.setPadding(0, 0, dp(8), 0)
-        val info = iconButton(R.drawable.ic_info, 44, 52)
-        val play = iconButton(R.drawable.ic_play, 44, 52)
-        row.addView(num, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT))
-        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(16) })
+        val typ = tv(r.type, 12f, 0xFFCCCCCC.toInt())
+        typ.setPadding(0, 0, dp(4), 0)
+        val info = iconButton(R.drawable.ic_info, 36, 52)
+        val prev = iconButton(R.drawable.ic_play, 38, 52)
+        val dl = iconButton(R.drawable.ic_download, 38, 52)
+        val thumb = ImageView(this)
+        thumb.scaleType = ImageView.ScaleType.CENTER_CROP
+        val tbg = GradientDrawable()
+        tbg.cornerRadius = dp(6).toFloat()
+        tbg.setColor(0xFF000000.toInt())
+        thumb.background = tbg
+        thumb.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, dp(6).toFloat())
+            }
+        }
+        thumb.clipToOutline = true
+        row.addView(num, LinearLayout.LayoutParams(dp(28), ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(thumb, LinearLayout.LayoutParams(dp(64), dp(40)).apply { leftMargin = dp(6) })
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(12) })
         row.addView(typ)
         row.addView(info)
-        row.addView(play)
+        row.addView(prev)
+        row.addView(dl)
         val go = {
             sheet.dismiss()
-            startVideoDownload(r.hls, r.url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref)
+            startVideoDownload(r.hls, r.url, lab.text.toString().takeIf { it != "Video" && it != "Stream" } ?: "", title, ua, ref, r.audio)
         }
-        row.setOnClickListener { go() }
-        play.setOnClickListener { go() }
+        val pv = { previewQuality(r, lab.text.toString(), ua, ref, go) }
+        // only the download button downloads; tapping the row or the play button previews
+        row.setOnClickListener { pv() }
+        thumb.setOnClickListener { pv() }
+        prev.setOnClickListener { pv() }
+        dl.setOnClickListener { if (r.enc) toast("This video is encrypted and cannot be saved") else go() }
+        if (r.enc) {
+            sub.text = "Encrypted - cannot be saved"
+            sub.visibility = View.VISIBLE
+            dl.alpha = 0.3f
+        } else if (r.hls && r.live) {
+            sub.text = "LIVE - saves what is available now"
+            sub.visibility = View.VISIBLE
+        }
+        r.thumb?.let { b ->
+            thumb.setImageBitmap(b)
+            if (head != null && head.drawable == null) head.setImageBitmap(b)
+        }
         info.setOnClickListener { videoInfo(r.url) }
+        if (!r.hls) Thread {
+            try {
+                val mmr = android.media.MediaMetadataRetriever()
+                mmr.setDataSource(r.url, hashMapOf("User-Agent" to ua, "Referer" to ref))
+                val bmp = mmr.getFrameAtTime(1_000_000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: mmr.getFrameAtTime(0L)
+                mmr.release()
+                if (bmp != null) runOnUiThread {
+                    thumb.setImageBitmap(bmp)
+                    if (head != null && head.drawable == null) head.setImageBitmap(bmp)
+                }
+            } catch (_: Throwable) {
+            }
+        }.start()
         list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
         val line = View(this)
         line.setBackgroundColor(0xFF333333.toInt())
@@ -2620,6 +2861,14 @@ class MainActivity : AppCompatActivity() {
             Thread {
                 val p = VideoDl.probe(r.url, ua, ref)
                 runOnUiThread {
+                    // not a real video (web page, image, json, tiny file): hide it
+                    if (p.type.startsWith("text/") || p.type.contains("html") || p.type.contains("json") ||
+                        p.type.startsWith("image/") || (p.w == 0 && p.h == 0 && p.size in 1..60000)
+                    ) {
+                        row.visibility = View.GONE
+                        line.visibility = View.GONE
+                        return@runOnUiThread
+                    }
                     if (p.w > 0 && p.h > 0) lab.text = p.w.toString() + "x" + p.h
                     if (p.size > 0) {
                         sub.text = Formatter.formatShortFileSize(this, p.size)
@@ -2742,7 +2991,7 @@ class MainActivity : AppCompatActivity() {
                 var n = 0
                 for (r in current.rows) {
                     n++
-                    makeRow(sheet, list, r, n, ua, ref, title)
+                    makeRow(sheet, list, r, n, ua, ref, title, thumb)
                 }
                 val others = groups.filter { it !== current }.sortedByDescending { it.seen }
                 if (others.isNotEmpty()) {
@@ -2861,10 +3110,10 @@ class MainActivity : AppCompatActivity() {
         showSheet(sheet, box)
     }
 
-    private fun startVideoDownload(hls: Boolean, url: String, label: String, title: String, ua: String, ref: String) {
+    private fun startVideoDownload(hls: Boolean, url: String, label: String, title: String, ua: String, ref: String, audio: String? = null) {
         val base = fileBase(title, label)
         if (hls) {
-            VideoDl.downloadHls(applicationContext, store, url, base, ua, ref) { m ->
+            VideoDl.downloadHls(applicationContext, store, url, audio, base, ua, ref) { m ->
                 runOnUiThread { toast(m) }
             }
         } else {

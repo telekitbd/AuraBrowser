@@ -4,6 +4,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -12,6 +13,7 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
@@ -22,6 +24,18 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var box: LinearLayout
     private lateinit var card: LinearLayout
     private val zooms = listOf(80, 100, 125, 150, 175)
+    private val histNames = listOf("Do not save", "100 pages", "500 pages", "2000 pages")
+    private val histValues = listOf(0, 100, 500, 2000)
+
+    private val exportLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            if (uri != null) doExport(uri)
+        }
+
+    private val importLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) doImport(uri)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -120,6 +134,14 @@ class SettingsActivity : AppCompatActivity() {
         toggleRow("JavaScript", "Turn off only if a site misbehaves", "js", true)
         toggleRow("Keep screen on", "Screen stays awake while browsing", "keepon", false)
 
+        section("Browsing")
+        toggleRow("Scroll buttons", "Floating arrow to jump to the top or bottom of a page", "scrollbtn", true)
+        val hi = histValues.indexOf(store.getInt("histmax", 500)).let { if (it < 0) 2 else it }
+        row("History", histNames[hi], null) { pickHistory() }
+        row("User scripts", "${UserScripts.list(store).size} scripts - run your own JavaScript on sites", null) {
+            startActivity(Intent(this, ScriptsActivity::class.java))
+        }
+
         section("Safety")
         toggleRow("HTTPS-only mode", "Upgrade http:// links to https://", "httpsonly", false)
         row("Safe Browsing", "Always off", null) { toast("Safe Browsing is always off") }
@@ -195,8 +217,150 @@ class SettingsActivity : AppCompatActivity() {
             render()
         }
 
+        section("App lock")
+        val lockOn = AppLock.enabled(store)
+        row("App lock", if (lockOn) "On - asks for your PIN when you come back" else "Off", sw(lockOn)) { toggleLock() }
+        if (lockOn) {
+            row("Change lock PIN", "4 to 8 digits", null) { verifyLockPin { newLockPin { render() } } }
+            toggleRow("Fingerprint unlock", "Use fingerprint or face instead of typing the PIN", "lockbio", true)
+            row("Lock", AppLock.TIME_NAMES[store.getInt("locktime", 1).coerceIn(0, AppLock.TIME_NAMES.size - 1)], null) {
+                pickLockTime()
+            }
+        }
+
+        section("Backup")
+        row("Back up to a file", "Bookmarks, history, shortcuts, memos, scripts and all settings", null) {
+            exportLauncher.launch("aura-browser-backup.json")
+        }
+        row("Restore from a file", "Pick a backup you saved before", null) {
+            importLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+        }
+
         section("About")
-        row("Aura Browser", "Version 1.1", null) { }
+        row("Aura Browser", "Version " + versionName(), null) { }
+    }
+
+    private fun versionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+
+    private fun pickHistory() {
+        val cur = histValues.indexOf(store.getInt("histmax", 500)).let { if (it < 0) 2 else it }
+        AlertDialog.Builder(this)
+            .setTitle("History")
+            .setSingleChoiceItems(histNames.toTypedArray(), cur) { d, w ->
+                store.setInt("histmax", histValues[w])
+                d.dismiss()
+                render()
+            }
+            .show()
+    }
+
+    private fun pickLockTime() {
+        AlertDialog.Builder(this)
+            .setTitle("Lock")
+            .setSingleChoiceItems(AppLock.TIME_NAMES.toTypedArray(), store.getInt("locktime", 1)) { d, w ->
+                store.setInt("locktime", w)
+                d.dismiss()
+                render()
+            }
+            .show()
+    }
+
+    private fun toggleLock() {
+        if (AppLock.enabled(store)) {
+            verifyLockPin {
+                store.setBool("applock", false)
+                store.setStr("lockpin", "")
+                AppLock.locked = false
+                toast("App lock is off")
+                render()
+            }
+        } else {
+            newLockPin {
+                store.setBool("applock", true)
+                AppLock.locked = false
+                toast("App lock is on")
+                render()
+            }
+        }
+    }
+
+    private fun pinField(hint: String): EditText {
+        val e = EditText(this)
+        e.hint = hint
+        e.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        e.maxLines = 1
+        return e
+    }
+
+    private fun verifyLockPin(onOk: () -> Unit) {
+        val e = pinField("Current lock PIN")
+        val b = LinearLayout(this)
+        b.setPadding(dp(20), dp(8), dp(20), 0)
+        b.addView(e, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        AlertDialog.Builder(this)
+            .setTitle("Enter lock PIN")
+            .setView(b)
+            .setPositiveButton("OK") { _, _ ->
+                if (AppLock.hash(e.text.toString()) == store.getStr("lockpin", "")) onOk() else toast("Wrong PIN")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun newLockPin(onOk: () -> Unit) {
+        val e1 = pinField("New PIN (4 to 8 digits)")
+        val e2 = pinField("Type it again")
+        val b = LinearLayout(this)
+        b.orientation = LinearLayout.VERTICAL
+        b.setPadding(dp(20), dp(8), dp(20), 0)
+        b.addView(e1)
+        b.addView(e2)
+        AlertDialog.Builder(this)
+            .setTitle("Set lock PIN")
+            .setView(b)
+            .setPositiveButton("Save") { _, _ ->
+                val p = e1.text.toString()
+                if (p.length < 4 || p.length > 8) {
+                    toast("The PIN needs 4 to 8 digits")
+                } else if (p != e2.text.toString()) {
+                    toast("The two PINs are different")
+                } else {
+                    store.setStr("lockpin", AppLock.hash(p))
+                    store.setInt("lockpinlen", p.length)
+                    toast("Lock PIN saved")
+                    onOk()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun doExport(uri: Uri) {
+        try {
+            contentResolver.openOutputStream(uri)?.use { it.write(store.exportAll().toByteArray()) }
+            toast("Backup saved")
+        } catch (e: Exception) {
+            toast("Could not save the backup")
+        }
+    }
+
+    private fun doImport(uri: Uri) {
+        try {
+            val text = contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() } ?: ""
+            val n = store.importAll(text)
+            if (n < 0) {
+                toast("This is not an Aura Browser backup")
+            } else {
+                toast("Restored $n items. Restart the app to apply everything")
+                render()
+            }
+        } catch (e: Exception) {
+            toast("Could not read the backup file")
+        }
     }
 
     private val POP_LEVELS = listOf(
